@@ -1,0 +1,19 @@
+{
+  "name": "tweakcc-context-bonsai",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Context Bonsai for Claude Code: ccsnap CLI + the context-bonsai MCP server (tweakcc).",
+  "bin": {
+    "ccsnap": "./src/index.ts",
+    "context-bonsai": "./mcp-server/index.ts"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "test": "bun test",
+    "typecheck": "bun x tsc --noEmit && cd mcp-server && bun x tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.0.0"
+  }
+}

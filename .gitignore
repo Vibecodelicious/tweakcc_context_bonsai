@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Bun lockfile (optional - some prefer to commit this)
+# bun.lockb
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor directories
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Agent temp files
+.agent_tmp/
+
+# Claude snapshots (managed by the tool itself)
+.claude-snapshots/

@@ -1,0 +1,680 @@
+#!/usr/bin/env bun
+
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
+import { rename, writeFile } from "fs/promises";
+import { readlink } from "fs/promises";
+import { join } from "path";
+import { findCurrentSession, findSessionPath, readSessionMessages } from "../src/lib/session";
+import { addArchivedMarkerEntries, markMessagesArchived, retrieveSession } from "../src/lib/compact";
+import type { SessionMessage, CompactMetadata } from "../src/types";
+
+const COMPATIBILITY_ERROR = "Compatibility error: unable to access active session.";
+const MATCHER_AMBIGUOUS_FROM =
+  "Error: from_pattern matched multiple messages. Provide a more specific pattern.";
+const MATCHER_AMBIGUOUS_TO =
+  "Error: to_pattern matched multiple messages. Provide a more specific pattern.";
+const MATCHER_UNRESOLVED_FROM = "Error: from_pattern did not match any message.";
+const MATCHER_UNRESOLVED_TO = "Error: to_pattern did not match any message.";
+const MATCHER_ORDER_ERROR =
+  "Error: from_pattern must resolve to a message that appears before or equal to to_pattern.";
+const ID_SELECTOR_ERROR =
+  "Error: ID selectors are not supported. Use from_pattern and to_pattern only.";
+const PRUNE_ARG_ERROR =
+  "Error: prune requires from_pattern, to_pattern, summary, and index_terms.";
+const RETRIEVE_ARG_ERROR = "Error: retrieve requires only anchor_id.";
+const RETRIEVE_NOT_FOUND = "Error: anchor_id not found.";
+const RETRIEVE_NOT_ARCHIVED = "Error: anchor_id is not archived.";
+interface SearchableMessage {
+  index: number;
+  uuid: string;
+  text: string;
+  hasPruneToolUse?: boolean;
+}
+
+interface AnchorArchiveMetadata {
+  archived: true;
+  summary_uuid: string;
+  range_end_id: string;
+  summary: string;
+  index_terms: string[];
+  reason?: string;
+}
+
+interface PruneArgs {
+  from_pattern?: unknown;
+  to_pattern?: unknown;
+  summary?: unknown;
+  index_terms?: unknown;
+  reason?: unknown;
+  from_id?: unknown;
+  to_id?: unknown;
+  id?: unknown;
+  anchor_id?: unknown;
+}
+
+interface RetrieveArgs {
+  anchor_id?: unknown;
+}
+
+interface ToolResponseMetadata {
+  op: "prune" | "retrieve";
+  anchor_id: string;
+  range_end_id: string;
+  placeholder_text: string;
+}
+
+function isUuidPattern(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+export function isIdSelectorPattern(value: string): boolean {
+  const trimmed = value.trim();
+  if (isUuidPattern(trimmed)) {
+    return true;
+  }
+
+  if (/^\[?msg:[^\]]+\]?$/i.test(trimmed)) {
+    return true;
+  }
+
+  return /^id:[^\s]+$/i.test(trimmed);
+}
+
+function asTrimmedString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+function normalizeIndexTerms(value: unknown): string[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const terms = value
+    .map((term) => (typeof term === "string" ? term.trim() : ""))
+    .filter((term) => term.length > 0);
+
+  if (terms.length === 0) {
+    return null;
+  }
+
+  return terms;
+}
+
+function plainText(text: string): { content: Array<{ type: "text"; text: string }> } {
+  return { content: [{ type: "text", text }] };
+}
+
+export function encodeToolResponseMetadata(metadata: ToolResponseMetadata): string {
+  const encoded = Buffer.from(JSON.stringify(metadata), "utf8").toString("base64");
+  return `<context-bonsai-tool-response encoding="base64">${encoded}</context-bonsai-tool-response>`;
+}
+
+function successResponse(text: string, metadata: ToolResponseMetadata): {
+  content: Array<{ type: "text"; text: string }>;
+} {
+  return plainText(`${text}\n${encodeToolResponseMetadata(metadata)}`);
+}
+
+function messageUuid(message: SessionMessage): string | null {
+  const maybeUuid = (message as { uuid?: unknown }).uuid;
+  return typeof maybeUuid === "string" && maybeUuid.length > 0 ? maybeUuid : null;
+}
+
+function flattenUnknown(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => flattenUnknown(item)).join(" ");
+  }
+
+  if (typeof value === "object") {
+    const fields = Object.values(value as Record<string, unknown>);
+    return fields.map((field) => flattenUnknown(field)).join(" ");
+  }
+
+  return String(value);
+}
+
+function searchableText(message: SessionMessage): string {
+  if (message.type === "user") {
+    return flattenUnknown(message.message?.content);
+  }
+
+  if (message.type === "assistant") {
+    return flattenUnknown(message.message?.content);
+  }
+
+  if (message.type === "summary") {
+    return message.summary;
+  }
+
+  return "";
+}
+
+function hasPruneToolUse(message: SessionMessage): boolean {
+  if (message.type !== "assistant") {
+    return false;
+  }
+
+  const content = (message as { message?: { content?: unknown } }).message?.content;
+  if (!Array.isArray(content)) {
+    return false;
+  }
+
+  return content.some((block) => {
+    if (!block || typeof block !== "object" || Array.isArray(block)) {
+      return false;
+    }
+
+    const candidate = block as { type?: unknown; name?: unknown };
+    // Keep these Claude MCP and local compatibility names in sync with prune tool wrappers.
+    return (
+      candidate.type === "tool_use" &&
+      (candidate.name === "mcp__context-bonsai__context-bonsai-prune" ||
+        candidate.name === "context-bonsai-prune")
+    );
+  });
+}
+
+export async function loadSearchableMessages(sessionPath: string): Promise<SearchableMessage[]> {
+  const output: SearchableMessage[] = [];
+  let index = 0;
+
+  for await (const message of readSessionMessages(sessionPath)) {
+    const uuid = messageUuid(message);
+    if (!uuid) {
+      continue;
+    }
+
+    output.push({
+      index,
+      uuid,
+      text: searchableText(message),
+      hasPruneToolUse: hasPruneToolUse(message),
+    });
+    index += 1;
+  }
+
+  return output;
+}
+
+export function resolveUniqueBoundary(
+  messages: SearchableMessage[],
+  pattern: string,
+  side: "from" | "to"
+): number {
+  const matches: number[] = [];
+
+  for (let i = 0; i < messages.length; i += 1) {
+    const message = messages[i];
+    if (message && message.text.includes(pattern)) {
+      matches.push(i);
+    }
+  }
+
+  if (matches.length > 1) {
+    const nonWrapperMatches = matches.filter((i) => !messages[i]?.hasPruneToolUse);
+    if (nonWrapperMatches.length === 1) {
+      return nonWrapperMatches[0]!;
+    }
+  }
+
+  if (matches.length === 1) {
+    return matches[0] as number;
+  }
+
+  if (side === "from") {
+    throw new Error(matches.length === 0 ? MATCHER_UNRESOLVED_FROM : MATCHER_AMBIGUOUS_FROM);
+  }
+
+  throw new Error(matches.length === 0 ? MATCHER_UNRESOLVED_TO : MATCHER_AMBIGUOUS_TO);
+}
+
+async function discoverSessionPath(): Promise<string> {
+  const readParentPid = async (pid: string): Promise<string | null> => {
+    try {
+      const stat = await Bun.file(`/proc/${pid}/stat`).text();
+      const end = stat.lastIndexOf(")");
+      if (end === -1) {
+        return null;
+      }
+
+      const fields = stat.slice(end + 2).split(" ");
+      return fields[1] && !Number.isNaN(Number(fields[1])) ? fields[1] : null;
+    } catch {
+      return null;
+    }
+  };
+
+  let currentPid = String(process.pid);
+
+  for (let depth = 0; depth < 10; depth++) {
+    const parentPid = await readParentPid(currentPid);
+    if (!parentPid || parentPid === "0" || parentPid === "1") {
+      break;
+    }
+
+    try {
+      const cmdline = await Bun.file(`/proc/${parentPid}/cmdline`).text();
+      const resumeMatch = cmdline.match(/resume\0([a-f0-9-]+)/);
+      if (resumeMatch?.[1]) {
+        return await findSessionPath(resumeMatch[1]);
+      }
+    } catch {
+      // Continue to cwd-based fallback for this ancestor.
+    }
+
+    try {
+      const cwd = await readlink(`/proc/${parentPid}/cwd`);
+      const current = await findCurrentSession(cwd);
+      if (current) {
+        return await findSessionPath(current.sessionId);
+      }
+    } catch {
+      // Try the next ancestor.
+    }
+
+    currentPid = parentPid;
+  }
+
+  throw new Error(COMPATIBILITY_ERROR);
+}
+
+async function writeJsonlAtomic(sessionPath: string, messages: SessionMessage[]): Promise<void> {
+  const tempPath = `${sessionPath}.bonsai.tmp`;
+  const body = `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`;
+  await writeFile(tempPath, body, "utf-8");
+  await rename(tempPath, sessionPath);
+}
+
+function buildPlaceholder(
+  fromUuid: string,
+  toUuid: string,
+  summary: string,
+  indexTerms: string[]
+): string {
+  return [
+    `[ARCHIVED RANGE ${fromUuid}..${toUuid}]`,
+    `Summary: ${summary}`,
+    `Index terms: ${indexTerms.join(", ")}`,
+  ].join("\n");
+}
+
+async function loadAllMessages(sessionPath: string): Promise<SessionMessage[]> {
+  const output: SessionMessage[] = [];
+  for await (const message of readSessionMessages(sessionPath)) {
+    output.push(message);
+  }
+  return output;
+}
+
+export async function finalizeRetrieveAfterMutation(
+  anchorId: string,
+  rangeEndId: string,
+  placeholderText: string,
+  clearAnchorMetadata: () => Promise<void>
+): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+  try {
+    await clearAnchorMetadata();
+  } catch {
+    // no-op
+  }
+
+  return successResponse(`Retrieve complete. anchor_id=${anchorId}`, {
+    op: "retrieve",
+    anchor_id: anchorId,
+    range_end_id: rangeEndId,
+    placeholder_text: placeholderText,
+  });
+}
+
+export function validatePruneArgs(args: PruneArgs):
+  | {
+      ok: true;
+      fromPattern: string;
+      toPattern: string;
+      summary: string;
+      indexTerms: string[];
+      reason?: string;
+    }
+  | { ok: false; error: string } {
+  if (
+    args.from_id !== undefined ||
+    args.to_id !== undefined ||
+    args.id !== undefined ||
+    args.anchor_id !== undefined
+  ) {
+    return { ok: false, error: ID_SELECTOR_ERROR };
+  }
+
+  const fromPattern = asTrimmedString(args.from_pattern);
+  const toPattern = asTrimmedString(args.to_pattern);
+  const summary = asTrimmedString(args.summary);
+  const indexTerms = normalizeIndexTerms(args.index_terms);
+
+  if (!fromPattern || !toPattern || !summary || !indexTerms) {
+    return { ok: false, error: PRUNE_ARG_ERROR };
+  }
+
+  if (isIdSelectorPattern(fromPattern) || isIdSelectorPattern(toPattern)) {
+    return { ok: false, error: ID_SELECTOR_ERROR };
+  }
+
+  const reason = asTrimmedString(args.reason);
+  return {
+    ok: true,
+    fromPattern,
+    toPattern,
+    summary,
+    indexTerms,
+    reason: reason ?? undefined,
+  };
+}
+
+async function handlePruneContext(args: PruneArgs): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+  const validated = validatePruneArgs(args);
+  if (!validated.ok) {
+    return plainText(validated.error);
+  }
+
+  let sessionPath: string;
+  try {
+    sessionPath = await discoverSessionPath();
+  } catch {
+    return plainText(COMPATIBILITY_ERROR);
+  }
+
+  let searchable: SearchableMessage[];
+  try {
+    searchable = await loadSearchableMessages(sessionPath);
+  } catch {
+    return plainText(COMPATIBILITY_ERROR);
+  }
+
+  let fromIndex: number;
+  let toIndex: number;
+  try {
+    fromIndex = resolveUniqueBoundary(searchable, validated.fromPattern, "from");
+    toIndex = resolveUniqueBoundary(searchable, validated.toPattern, "to");
+  } catch (error) {
+    return plainText(error instanceof Error ? error.message : String(error));
+  }
+
+  if (fromIndex > toIndex) {
+    return plainText(MATCHER_ORDER_ERROR);
+  }
+
+  const fromMessage = searchable[fromIndex];
+  const toMessage = searchable[toIndex];
+  if (!fromMessage || !toMessage) {
+    return plainText(COMPATIBILITY_ERROR);
+  }
+
+  const fromUuid = fromMessage.uuid;
+  const toUuid = toMessage.uuid;
+  const summaryUuid = crypto.randomUUID();
+  const placeholderText = buildPlaceholder(
+    fromUuid,
+    toUuid,
+    validated.summary,
+    validated.indexTerms
+  );
+
+  try {
+    const archivedAt = new Date().toISOString();
+    const markResult = await markMessagesArchived(sessionPath, fromUuid, toUuid, summaryUuid, {
+      skipWrite: true,
+    });
+
+    const compactMetadata: CompactMetadata = {
+      fromMessageId: fromUuid,
+      toMessageId: toUuid,
+      messageCount: markResult.messageCount,
+    };
+
+    const anchorMetadata: AnchorArchiveMetadata = {
+      archived: true,
+      summary_uuid: summaryUuid,
+      range_end_id: toUuid,
+      summary: validated.summary,
+      index_terms: validated.indexTerms,
+      ...(validated.reason ? { reason: validated.reason } : {}),
+    };
+
+    for (const message of markResult.allMessages) {
+      const uuid = messageUuid(message);
+      if (uuid === fromUuid) {
+        (message as SessionMessage & { context_bonsai_v2?: AnchorArchiveMetadata }).context_bonsai_v2 =
+          anchorMetadata;
+      }
+    }
+
+    const placeholderMessage = {
+      type: "summary",
+      uuid: summaryUuid,
+      summary: placeholderText,
+      timestamp: archivedAt,
+      compactMetadata,
+      context_bonsai_v2: {
+        anchor_id: fromUuid,
+        range_end_id: toUuid,
+        summary: validated.summary,
+        index_terms: validated.indexTerms,
+      },
+    } as SessionMessage;
+
+    markResult.allMessages.push(placeholderMessage);
+    await writeJsonlAtomic(sessionPath, markResult.allMessages);
+
+    const archivedUuids = markResult.messages
+      .filter((message) => message.type === "user" || message.type === "assistant")
+      .map((message) => message.uuid);
+    try {
+      await addArchivedMarkerEntries(sessionPath, archivedUuids);
+    } catch {
+      // no-op
+    }
+
+    return successResponse(`Prune complete. anchor_id=${fromUuid}`, {
+      op: "prune",
+      anchor_id: fromUuid,
+      range_end_id: toUuid,
+      placeholder_text: placeholderText,
+    });
+  } catch {
+    return plainText("Error: prune failed.");
+  }
+}
+
+export function validateRetrieveArgs(args: RetrieveArgs):
+  | { ok: true; anchorId: string }
+  | { ok: false; error: string } {
+  const keys = Object.keys(args);
+  if (keys.length !== 1 || !("anchor_id" in args)) {
+    return { ok: false, error: RETRIEVE_ARG_ERROR };
+  }
+
+  const anchorId = asTrimmedString(args.anchor_id);
+  if (!anchorId) {
+    return { ok: false, error: RETRIEVE_ARG_ERROR };
+  }
+
+  return { ok: true, anchorId };
+}
+
+async function handleRetrieveContext(args: RetrieveArgs): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+  const validated = validateRetrieveArgs(args);
+  if (!validated.ok) {
+    return plainText(validated.error);
+  }
+
+  let sessionPath: string;
+  try {
+    sessionPath = await discoverSessionPath();
+  } catch {
+    return plainText(COMPATIBILITY_ERROR);
+  }
+
+  let currentMessages: SessionMessage[];
+  try {
+    currentMessages = await loadAllMessages(sessionPath);
+  } catch {
+    return plainText(COMPATIBILITY_ERROR);
+  }
+
+  const anchorMessage = currentMessages.find(
+    (message) => messageUuid(message) === validated.anchorId
+  ) as (SessionMessage & { context_bonsai_v2?: AnchorArchiveMetadata }) | undefined;
+
+  if (!anchorMessage) {
+    return plainText(RETRIEVE_NOT_FOUND);
+  }
+
+  const metadata = anchorMessage.context_bonsai_v2;
+  if (!metadata || metadata.archived !== true || !metadata.summary_uuid) {
+    return plainText(RETRIEVE_NOT_ARCHIVED);
+  }
+
+  const placeholderText = buildPlaceholder(
+    validated.anchorId,
+    metadata.range_end_id,
+    metadata.summary,
+    metadata.index_terms
+  );
+
+  try {
+    await retrieveSession(sessionPath, [metadata.summary_uuid]);
+  } catch {
+    return plainText(RETRIEVE_NOT_ARCHIVED);
+  }
+
+  return finalizeRetrieveAfterMutation(
+    validated.anchorId,
+    metadata.range_end_id,
+    placeholderText,
+    async () => {
+    const refreshed = await loadAllMessages(sessionPath);
+    for (const message of refreshed) {
+      if (messageUuid(message) === validated.anchorId) {
+        delete (message as SessionMessage & { context_bonsai_v2?: AnchorArchiveMetadata }).context_bonsai_v2;
+      }
+    }
+    await writeJsonlAtomic(sessionPath, refreshed);
+    }
+  );
+}
+
+export function listContextBonsaiTools() {
+  return [
+    {
+      name: "context-bonsai-prune",
+      description:
+        "Archive one contiguous range resolved by unique from_pattern/to_pattern and store summary metadata.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          from_pattern: {
+            type: "string",
+            description: "Unique plain-text pattern matching the first message in range.",
+          },
+          to_pattern: {
+            type: "string",
+            description: "Unique plain-text pattern matching the last message in range.",
+          },
+          summary: {
+            type: "string",
+            description: "Model-authored summary of archived content.",
+          },
+          index_terms: {
+            type: "array",
+            items: { type: "string" },
+            description: "Non-empty semantic index terms.",
+          },
+          reason: {
+            type: "string",
+            description: "Optional reason for pruning.",
+          },
+        },
+        required: ["from_pattern", "to_pattern", "summary", "index_terms"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "context-bonsai-retrieve",
+      description: "Restore an archived range using only anchor_id.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          anchor_id: {
+            type: "string",
+            description: "Anchor UUID for the archived range to restore.",
+          },
+        },
+        required: ["anchor_id"],
+        additionalProperties: false,
+      },
+    },
+  ];
+}
+
+export async function routeContextBonsaiTool(
+  name: string,
+  args: unknown
+): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+  if (name === "context-bonsai-prune") {
+    return handlePruneContext((args as PruneArgs) || {});
+  }
+
+  if (name === "context-bonsai-retrieve") {
+    return handleRetrieveContext((args as RetrieveArgs) || {});
+  }
+  throw new Error(`Unknown tool: ${name}`);
+}
+
+const server = new Server(
+  {
+    name: "context-bonsai-v2",
+    version: "2.0.0",
+  },
+  {
+    capabilities: {
+      tools: {},
+    },
+  }
+);
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: listContextBonsaiTools(),
+}));
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  return routeContextBonsaiTool(request.params.name, request.params.arguments);
+});
+
+export async function main(): Promise<void> {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+if (import.meta.main) {
+  main().catch(() => {
+    console.error("Fatal error: failed to start context-bonsai-v2 MCP server.");
+    process.exit(1);
+  });
+}
