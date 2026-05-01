@@ -1,30 +1,22 @@
-# tweakcc_context_bonsai
+# tweakcc Context Bonsai
 
-Side project for the Context Bonsai Claude Code port. Ships:
+Context Bonsai support for Claude Code.
 
-- **`ccsnap`** — CLI for archiving / restoring Claude Code session JSONL ranges.
-- **`context-bonsai` MCP server** — exposes `context-bonsai-prune` and `context-bonsai-retrieve` tools to Claude Code via MCP.
+Claude Code is closed-source, so this repo provides the side implementation: a `ccsnap` CLI plus a `context-bonsai` MCP server that can operate on Claude Code session files.
 
-Together these implement context-bonsai for Claude Code: the model invokes the prune/retrieve tools through MCP, and `ccsnap` performs the underlying JSONL mutations.
+For the shared explanation of Context Bonsai, see the main project README: https://github.com/Vibecodelicious/context-bonsai-agents
 
-## Scope
+## Installation
 
-- `src/` — `ccsnap` CLI source + libs.
-- `mcp-server/` — the context-bonsai MCP server.
-- `docs/` — context-bonsai v2 spec, e2e protocol, validation docs.
-- `scripts/validate/` — release-time validation scripts.
-- `STANDARDS.md` — coding standards authoritative for this side repo.
+Install dependencies from this repo:
 
-## Related
+```sh
+bun install
+cd mcp-server
+bun install
+```
 
-- Parent planning repo: [`context-bonsai-agents`](../).
-- Per-agent spec: `docs/agent-specs/claude-code-context-bonsai-spec.md` (in parent repo).
-- Cross-agent spec: `docs/context-bonsai-agent-spec.md` (in parent repo).
-- Companion patch: the [`tweakcc`](https://github.com/Piebald-AI/tweakcc) fork — apply with `npx tweakcc --apply` to enable the `archivedFilter` and gauge UI patches in your local Claude Code install.
-
-## Integration
-
-Register the MCP server in `~/.claude/settings.json`:
+Register the MCP server in Claude Code by adding it to `~/.claude/settings.json`:
 
 ```json
 {
@@ -37,20 +29,45 @@ Register the MCP server in `~/.claude/settings.json`:
 }
 ```
 
-Then (optionally) apply the tweakcc patches:
+Restart Claude Code after changing MCP settings.
+
+The optional tweakcc patches improve the Claude Code runtime experience by filtering archived messages and surfacing context-pressure guidance in the harness. The core CLI and MCP server can start without those patches, but full in-harness behavior depends on Claude Code being able to hide archived messages from the live context.
+
+## Usage
+
+The MCP server exposes:
+
+- `context-bonsai-prune`
+- `context-bonsai-retrieve`
+
+It discovers the active Claude Code session, resolves prune boundaries by unique text patterns, updates the session JSONL, records archive metadata, and appends a summary placeholder. Retrieval restores archived messages from the anchor metadata.
+
+The repo also provides the `ccsnap` CLI for session snapshot and archive operations:
 
 ```sh
-npx tweakcc --apply
+bun run src/index.ts --help
 ```
 
-The MCP server reads Claude Code's session JSONL at `~/.claude/projects/<project-hash>/<session-id>.jsonl`, performs prune/retrieve operations, and writes archive marker files to `~/.claude/archived-<session-id>.json`. The optional tweakcc patches hide archived ranges from the live transcript and surface the gauge UI.
+## How This Is Implemented For Claude Code
+
+The MCP server and CLI share TypeScript library code. The MCP server imports the library directly rather than shelling out to the CLI.
+
+Current persistence uses Claude Code's local session layout under `~/.claude`, including session JSONL files in `~/.claude/projects/...` and archive marker files named `~/.claude/archived-<session-id>.json`.
+
+Because Claude Code is not open-source, there is no paired harness repo in this workspace.
+
+## Requirements And Limitations
+
+- Bun is required.
+- Claude Code local session files must be available under `~/.claude`.
+- Linux-like `/proc` support is used for process-based session discovery.
+- Prune uses unique plain-text boundaries; UUID selectors are rejected by the MCP tool.
 
 ## Development
 
-```sh
-bun install
-bun test          # both root + mcp-server tests
-bun run typecheck # both packages
-```
+See [DEVELOPMENT.md](DEVELOPMENT.md).
 
-See `STANDARDS.md` for coding conventions and `docs/e2e-protocol.md` for the end-to-end validation procedure.
+```sh
+bun test
+bun run typecheck
+```
