@@ -9,11 +9,16 @@
   },
   "scripts": {
     "start": "bun run src/index.ts",
+    "apply": "bun run apply/apply-bonsai.ts",
+    "apply:restore": "bun run apply/apply-bonsai.ts --restore",
     "test": "bun test",
     "typecheck": "bun x tsc --noEmit && cd mcp-server && bun x tsc --noEmit"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "tweakcc": "^4.0.13"
   }
 }

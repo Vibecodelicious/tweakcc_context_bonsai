@@ -13,12 +13,12 @@
     "types": ["bun-types"],
     "lib": ["ESNext"],
     "outDir": "./dist",
-    "rootDir": "./src",
+    "rootDir": ".",
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"]
     }
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "apply/**/*.ts", "patches/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

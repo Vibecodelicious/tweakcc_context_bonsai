@@ -4,7 +4,7 @@
 
 - This side repo holds Context Bonsai for Claude Code: the `ccsnap` CLI plus the `context-bonsai` MCP server (the tweakcc surface).
 - Claude Code is closed-source. There is no agent-repo to mirror; conventions are set by the cross-agent spec at `docs/context-bonsai-agent-spec.md` (in the parent planning repo) and the per-agent spec at `docs/agent-specs/claude-code-context-bonsai-spec.md`.
-- The `tweakcc` Piebald-AI fork is a separate companion repo applied via `npx tweakcc --apply`; it is NOT part of this repo's source.
+- Claude Code patching is implemented in this repo with tweakcc 4.0's programmatic API. The apply harness composes local patch transforms over one content string and writes once.
 
 ## Language / runtime
 
@@ -35,11 +35,13 @@
 - `mcp-server/` — context-bonsai MCP server.
   - `mcp-server/index.ts` — MCP entry (`bin: context-bonsai`); wires `context-bonsai-prune` and `context-bonsai-retrieve` tools.
   - `mcp-server/index.test.ts` — unit + integration tests (Bun `describe`/`test`).
+- `patches/` — Context Bonsai patch transform modules and their ordered registry. Patch modules export `BonsaiPatch` and must be composed by the apply harness, not run as separate `adhoc-patch` CLI calls.
+- `apply/` — tweakcc 4.0 API wrapper and the Context Bonsai apply/restore harness.
 - `docs/` — bonsai v2 specs, e2e protocol, validation docs.
 - `scripts/validate/` — release-time validation scripts.
 
 ## Out of scope
 
-- The Piebald-AI tweakcc fork: lives at the_observer's `tweakcc/` submodule and is applied separately by users via `npx tweakcc --apply`. This repo does not vendor it.
-- Claude Code itself: closed-source; not modified.
+- Maintaining a custom tweakcc distribution. Context Bonsai depends on published tweakcc 4.0.x and wraps its API locally because the published tarball currently omits `dist/lib/index.d.ts`.
+- Direct edits to Claude Code source outside the apply harness. Native and npm installs are accessed through tweakcc `readContent`/`writeContent`, with `backupFile`/`restoreBackup` for reversibility.
 - Other ccsnap features unrelated to context-bonsai: keep ccsnap focused on what bonsai needs (session loader, JSONL archival).

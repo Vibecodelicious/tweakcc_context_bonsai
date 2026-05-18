@@ -4,7 +4,7 @@
 
 A context management system for Claude Code. Three pieces working together:
 
-1. **tweakcc patches** — Hide archived messages and inject model-visible message tags when compaction mode is enabled
+1. **tweakcc 4.0 apply harness + patches** — Patch the active Claude Code install through tweakcc's programmatic API so archived messages are removed from model-facing context and model-visible message tags can be injected when compaction mode is enabled
 2. **MCP server** — Two tools (`context-bonsai-prune`, `context-bonsai-retrieve`) the LLM calls to manage its own context
 3. **ccsnap CLI** — The engine that reads/writes Claude Code's JSONL session files
 
@@ -18,7 +18,7 @@ A user hits their 200k context limit, the LLM compacts old messages into a summa
 |-----------|--------|----------|
 | ccsnap CLI | Working | `src/` — 39 tests passing |
 | MCP server | Working | `mcp-server/index.ts` |
-| tweakcc patches | Working, reviewed | `tweakcc/` — 4 commits on `context-compaction-patches` |
+| tweakcc 4.0 foundation | In progress | `apply/`, `patches/` |
 | retrieve-by-anchor workflow | Complete | Commits `a8ac1db`, `11fe35d` on main |
 | Orchestration review loops | Complete | Both stories APPROVED AS-IS |
 
@@ -26,55 +26,40 @@ A user hits their 200k context limit, the LLM compacts old messages into a summa
 
 | Step | Blocks | Effort | Notes |
 |------|--------|--------|-------|
-| Push tweakcc branch + create PR | ccsnap README | 5 min | Ready now. Branch, fork, commits all set. |
-| Get tweakcc PR merged | End users | Unknown | Depends on Piebald-AI maintainer review |
-| Create `Vibecodelicious/ccsnap` repo | End users | ~2 hrs | Story 2 planned at `.agents/plans/epic-distribute-context-compaction/story-distribute-context-compaction.2-ccsnap-repo.md` |
-| End-to-end smoke test | Confidence | ~30 min | Compact + retrieve in a live session |
+| Real patch transforms | Context reduction | Stories 4-6 | `archived-filter`, `message-content-ids`, and `context-bonsai-gauge` plug into `patches/registry.ts` |
+| MCP fail-closed guard | Safe prune behavior | Story 7 | Prune must check the running Claude Code executable for the archived-filter sentinel before writing archives |
+| Native end-to-end test | Release confidence | Story 8 | Apply the documented flow to a native install copy and prove a prune reduces model-facing context |
+| Operator docs | End users | Story 9 | Publish final install, verify, restore, and auto-update guidance |
 
 ## Shipping Sequence
 
 ```
-Step 1: Push tweakcc PR          ← you can do this right now
+Step 1: Apply harness foundation
    │
-   ├── Step 2: Create ccsnap repo   ← can start immediately (README links to PR)
+   ├── Step 2: Add resilient discovery
    │      │
-   │      └── Step 3: Smoke test    ← fresh clone, install, test the workflow
-   │
-   └── Step 4: PR gets merged       ← external dependency (Piebald-AI review)
-          │
-          └── Step 5: Users can install ← tweakcc ships patches, ccsnap ships tools
+   │      └── Step 3: Add the three patch transforms
+   │             │
+   │             └── Step 4: Refresh MCP/ccsnap patch awareness
+   │                    │
+   │                    └── Step 5: Native end-to-end verification and operator docs
 ```
 
-Steps 1 and 2 are in your control. Step 4 is not.
+The current shipping path is self-contained in this repo: `bun run apply` detects the Claude Code installation, creates a backup, reads content once, composes registered patch transforms in order, writes once, and verifies sentinels. `bun run apply:restore` restores from the backup.
 
-## Step 1: Push tweakcc PR
+## Step 1: Apply Harness Foundation
 
-Everything is ready. Four commits on `context-compaction-patches` in the tweakcc submodule:
-
-```
-af7c181 Add archived message filter patch
-dda426a Add archived/context compaction patches
-94a9461 Add message content ID injection patch
-84d94f0 [Story] Fix misleading message-ids patch description
-```
-
-Fork remote (`Vibecodelicious/tweakcc`) is configured. To ship:
+The harness uses published tweakcc 4.0.x directly:
 
 ```bash
-cd ~/projects/the_observer/tweakcc
-git push fork context-compaction-patches
-gh pr create --repo Piebald-AI/tweakcc \
-  --head Vibecodelicious:context-compaction-patches \
-  --base main \
-  --title "Add context compaction patches" \
-  --body "..."
+bun install
+bun run apply
+bun run apply:restore
 ```
 
-The PR body and commit messages are already written in the story plan. I can do this for you on command.
+Patch modules are normal TypeScript transforms registered in `patches/registry.ts`. They are not independent `tweakcc adhoc-patch` CLI calls; separate CLI calls would re-read pristine content and would not provide the one-backup, one-read, one-write composition guarantee this port needs.
 
-**Decision point:** The branch has 4 commits (3 feature + 1 description fix). You may want to squash the fix into commit 2 with `git rebase -i` before pushing, so the PR has exactly 3 clean commits as originally planned. Or ship 4 — the fix commit is small and self-explanatory.
-
-## Step 2: Create ccsnap Repo
+## Step 2: Package ccsnap
 
 Planned as Story 2 of the distribution epic. The plan is at:
 `.agents/plans/epic-distribute-context-compaction/story-distribute-context-compaction.2-ccsnap-repo.md`
@@ -92,30 +77,23 @@ This is ready to orchestrate whenever you want.
 
 Before calling it shipped, test the full workflow in a real Claude Code session:
 
-1. Apply tweakcc patches (`enableContextCompaction: true`, `enableArchivedFilter: true`)
-2. Register MCP server in `~/.claude/settings.json`
+1. Apply Context Bonsai patches with `bun run apply`
+2. Register MCP server in the Claude Code MCP configuration file verified by Story 7
 3. Start a Claude Code session, generate some conversation
 4. Ask Claude to prune a uniquely bounded message range with `context-bonsai-prune`
 5. Verify archived messages disappear from the UI
 6. Ask Claude to retrieve the archived range by `anchor_id`
 7. Verify the message reappears
 
-## Step 4: tweakcc PR Merge
+## Step 4: Auto-Update Handling
 
-External dependency. Things that help it merge:
-- Each commit is independently buildable (`npm run build` passes)
-- Zero impact on existing users (config flags off by default)
-- Clean diffs (purely additive, 0 lines removed from existing files)
-- Tests included for the complex patches
-- `findRuntimeHelpers()` handles version-independent minification discovery
-
-If Piebald-AI wants changes, that's a new review cycle in the tweakcc submodule.
+Claude Code updates replace the executable and remove embedded sentinels. The apply harness reports a reverted-after-update state when a previous backup exists but patch sentinels are absent, and the MCP prune path must fail closed until `bun run apply` is rerun.
 
 ## Risk Register
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| tweakcc PR rejected or stalls | Can't distribute patches | Patches still work locally; users could apply manually |
+| tweakcc API drift | Apply harness breaks | Keep the typed wrapper in `apply/tweakcc-api.ts` small and validate against tweakcc 4.0.x |
 | Claude Code update breaks minification patterns | Patches stop working | `findRuntimeHelpers()` dynamically discovers names; regex patterns cover known variants |
 | Session file format changes | ccsnap breaks | JSONL format has been stable; types.ts defines the contract |
 | `/proc` dependency (Linux-only) | No macOS support for `ps`/`switch` | MCP server session discovery has `/proc` fallback to `history.jsonl`; snapshot features are Linux-only for now |
@@ -136,11 +114,8 @@ the_observer/
 │   └── types.ts                  # Message type definitions
 ├── mcp-server/
 │   └── index.ts                  # MCP server (context-bonsai-prune, context-bonsai-retrieve)
-├── tweakcc/                      # Submodule: Piebald-AI/tweakcc fork
-│   └── src/patches/
-│       ├── archivedFilter.ts     # Hide archived messages from UI
-│       ├── messageContentIds.ts  # Inject [msg:<uuid>] into model-visible context
-│       └── helpers.ts            # findRuntimeHelpers() addition
+├── apply/                        # tweakcc 4.0 API wrapper and apply/restore harness
+├── patches/                      # Ordered Context Bonsai patch transforms
 └── .agents/plans/                # Story plans (not shipped)
 ```
 
@@ -168,9 +143,9 @@ the_observer/
 
 ## TL;DR
 
-1. Push the tweakcc PR (5 min, ready now)
-2. Create the ccsnap repo (orchestrate Story 2)
-3. Smoke test the full workflow
-4. Wait for tweakcc merge
+1. Build the tweakcc 4.0 apply harness
+2. Add resilient discovery and the three patch transforms
+3. Refresh MCP fail-closed behavior
+4. Smoke test the full native workflow
 
-You're closer than it feels. The hard engineering is done.
+The old external-review path is gone; Context Bonsai now owns its patch modules and composes them through published tweakcc 4.0 APIs.
