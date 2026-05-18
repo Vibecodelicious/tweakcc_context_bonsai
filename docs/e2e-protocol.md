@@ -3,18 +3,20 @@
 ## Test Metadata
 
 - Implementation name: tweakcc Context Bonsai for Claude Code
-- Repository root: `/home/basil/projects/tweakcc_context_bonsai`
-- Runtime entry point: `claude` (Anthropic Claude Code CLI)
+- Repository root: repo-local `tweakcc_context_bonsai/` checkout under test
+- Runtime entry point: native `claude` (Anthropic Claude Code CLI), primary target Claude Code native `2.1.143` Linux x64
 - Session storage location: `~/.claude/projects/<project-hash>/<session-id>.jsonl`
-- Tool transport: MCP stdio (registered in `~/.claude/settings.json` `mcpServers.context-bonsai`)
-- Companion (optional): [tweakcc Piebald-AI fork](https://github.com/Piebald-AI/tweakcc) applied via `npx tweakcc --apply`
+- Tool transport: MCP stdio (registered in `~/.claude.json` `mcpServers.context-bonsai`)
+- Runtime patch path: tweakcc 4.0 apply harness, `cd tweakcc_context_bonsai && bun run apply`
 - Model/provider under test: Anthropic Claude (whichever the local Claude Code is configured for)
 - Date: fill in per run
 - Operator: fill in per run
 
 ## Scope
 
-This protocol validates Context Bonsai integration behavior for Claude Code via the `tweakcc_context_bonsai` MCP server. Do not modify implementation code during the run unless this run is part of an explicit fix loop.
+This protocol validates Context Bonsai integration behavior for native Claude Code via the `tweakcc_context_bonsai` MCP server plus the tweakcc 4.0 patch transforms. Do not modify implementation code during the run unless this run is part of an explicit fix loop.
+
+Full PASS is a release gate for the Claude Code port. A run is not a full PASS unless the install-procedure scenario, E2E-01..07, Protocol A, and the pinned-target artifact evidence all PASS for native Claude Code.
 
 ## Required Scenario Set
 
@@ -22,6 +24,7 @@ Per the cross-agent template at `docs/context-bonsai-e2e-template.md`:
 
 | ID | Scenario | Required outcome |
 |---|---|---|
+| E2E-00 | Clean install procedure | Fresh fly.io sprite runs documented commands verbatim; patches land; MCP tools are registered and functional; prune measurably reduces model-facing context |
 | E2E-01 | Contiguous prune success | Bounded range archived; placeholder visible in subsequent turns; JSONL mutation atomic |
 | E2E-02 | Boundary ambiguity / unresolved rejection | Deterministic plain-text error; no JSONL mutation |
 | E2E-03 | Retrieve by anchor success | Archived range visible again; placeholder effect gone |
@@ -39,19 +42,23 @@ Run before every e2e session:
 claude --version
 
 # Side-repo tests pass
-cd /home/basil/projects/tweakcc_context_bonsai
+cd /path/to/tweakcc_context_bonsai
+bun run typecheck
 bun test
 
 # MCP server registered
-grep -A 4 '"context-bonsai"' ~/.claude/settings.json
+bun -e 'const c=await Bun.file(`${process.env.HOME}/.claude.json`).json(); if(!JSON.stringify(c.mcpServers||{}).includes("context-bonsai")) process.exit(1)'
+
+# Patches applied to the runtime under test
+bun run apply
 
 # Bare repo + working tree healthy
-cd /home/basil/projects/tweakcc_context_bonsai
+cd /path/to/tweakcc_context_bonsai
 git status --short
 git log --oneline -1
 
-# Optional: tweakcc patches applied (record state for the run)
-which tweakcc || echo "tweakcc not installed (E2E-04 gauge UI + E2E-06 archivedFilter will be partial)"
+# Target artifact evidence available or explicitly blocked
+bun run e2e/native-e2e.ts artifact-evidence --out /tmp/cc-bonsai-e2e/target-evidence.json
 
 # Artifact dir for this run
 mkdir -p /tmp/cc-bonsai-e2e/$(date -u +%Y%m%dT%H%M%SZ)
@@ -60,9 +67,11 @@ mkdir -p /tmp/cc-bonsai-e2e/$(date -u +%Y%m%dT%H%M%SZ)
 Expected pre-flight result:
 
 - `claude --version` reports a known build
-- `bun test` passes (modulo the two pre-existing environment-dependent failures in `src/lib/{session,snapshot}.test.ts` documented in the v0.1.0 release notes)
-- `~/.claude/settings.json` contains a `context-bonsai` entry pointing to `tweakcc_context_bonsai/mcp-server/index.ts`
+- `bun run typecheck` and `bun test` pass
+- `~/.claude.json` contains a `context-bonsai` entry pointing to `tweakcc_context_bonsai/mcp-server/index.ts`
+- `bun run apply` reports `Context Bonsai apply complete` or `Context Bonsai already patched`
 - The side repo is clean
+- Target artifact evidence is written, or the run is BLOCKED before release-gate PASS is claimed
 
 If a required dependency is unavailable, classify the run as `BLOCKED`.
 
@@ -72,14 +81,69 @@ If a required dependency is unavailable, classify the run as `BLOCKED`.
 - Archive marker file: `~/.claude/archived-<session-id>.json` (written by `addArchivedMarkerEntries`).
 - Tool-response stdout from MCP (visible in Claude Code's transcript as `tool_result` blocks).
 - Optional: tweakcc UI capture (TUI screenshot or `script(1)` log) if patches applied.
+- Pinned-target artifact evidence: `tweakcc_context_bonsai/.artifacts/claude-code/2.1.143/linux-x64/manifest.json`, `extracted.js`, and the run's evidence JSON.
 
 Prefer JSONL inspection over stdout where both are available.
 
 ## Scenarios
 
+### E2E-00 — Clean install procedure
+
+**Goal:** prove a fresh machine can follow the documented native Claude Code + tweakcc 4.0 install flow verbatim and end up with functional bonsai tools, not only registered names.
+
+**Fresh-machine model:** use a fly.io sprite per `docs/installation-e2e-template.md`. Provider credentials are provisioned in Phase 0 by the harness operator and are never written into commands, run records, or artifacts.
+
+**Setup:**
+
+```bash
+sprite create cc-bonsai-native-e2e-<utc>
+sprite exec -s cc-bonsai-native-e2e-<utc> 'claude --version'
+```
+
+**Documented commands under test:** copy the current operator-facing commands verbatim. Until Story 9 lands the final operator doc, the canonical source for this story is `tweakcc_context_bonsai/CC_BONSAI.md` Step 1 and Step 3:
+
+```bash
+bun install
+bun run apply
+```
+
+MCP registration must use `~/.claude.json` with `mcpServers.context-bonsai` pointing at `tweakcc_context_bonsai/mcp-server/index.ts`. If the operator doc later changes these commands, this scenario must run the updated doc commands verbatim instead.
+
+**Execution:**
+
+1. Provision the sprite and credentials out of band.
+2. Clone or otherwise place the repo at the path documented for operators.
+3. Run the documented commands exactly, in order, with no extra flags or local workarounds.
+4. Verify `claude mcp list` or the Claude Code tool inventory shows `context-bonsai-prune` and `context-bonsai-retrieve`.
+5. Start a fresh native Claude Code session and drive E2E-01's prune smoke.
+6. Verify the archived-filter patch sentinel is embedded in the running native executable and the pruned range is absent from the model-facing request path on the next turn.
+
+**Evidence collection:**
+
+```bash
+sprite exec -s cc-bonsai-native-e2e-<utc> 'claude --version' > /tmp/cc-bonsai-e2e/<run>/E2E-00-claude-version.txt
+sprite exec -s cc-bonsai-native-e2e-<utc> 'cd /path/to/tweakcc_context_bonsai && bun run apply' > /tmp/cc-bonsai-e2e/<run>/E2E-00-apply.txt 2>&1
+sprite exec -s cc-bonsai-native-e2e-<utc> 'claude mcp list' > /tmp/cc-bonsai-e2e/<run>/E2E-00-mcp-list.txt 2>&1
+```
+
+Look for:
+
+- Documented install commands exit 0 without undocumented dependencies.
+- MCP inventory includes both bonsai tools.
+- `bun run apply` reports all three patch sentinels verified.
+- A real prune removes content from active model context, as evidenced by E2E-01 and Protocol A.
+
+**Verdict rules:**
+
+- `PASS`: documented commands run verbatim from a clean sprite, tools are registered, patches are present, and a prune measurably reduces model-facing context.
+- `BLOCKED`: sprite provisioning, provider credentials, network, native Claude Code availability, or pinned target artifact is unavailable.
+- `FAIL`: commands exit 0 but tools are not registered, patches do not land, or prune does not reduce active context.
+
+**Reason codes:** `clean-install-pass`, `credentials-missing-in-harness`, `sprite-unavailable`, `native-runtime-missing`, `tools-not-registered`, `patch-not-applied`, `prune-not-reducing-context`.
+
 ### E2E-01 — Contiguous prune success
 
-**Goal:** prove the MCP server can prune a unique boundary range and the placeholder is model-visible in subsequent turns.
+**Goal:** prove the MCP server can prune a unique boundary range and the patched native runtime removes the archived follower messages from model-facing context on subsequent turns.
 
 **Setup:**
 
@@ -100,7 +164,7 @@ claude --new-session
 
 - Tool call: `mcp__context-bonsai__context-bonsai-prune` with `{from_pattern: "ALPHA-PHRASE-001", to_pattern: "OMEGA-PHRASE-001", summary: "...", index_terms: [...]}`
 - Tool result: success body containing the anchor id
-- Subsequent transcript: archived range collapsed into a single `summary`-typed entry; original `tool_use`/`tool_result` blocks no longer appear in turn-by-turn inspection (or, with tweakcc patch applied, hidden from the live view)
+- Subsequent transcript: archived range collapsed into a single `summary`-typed entry; original `tool_use`/`tool_result` blocks are hidden from the live model-facing view by the archived-filter patch
 
 **Evidence collection:**
 
@@ -116,6 +180,7 @@ Look for:
 - A `tool_use` block with `name: "mcp__context-bonsai__context-bonsai-prune"` and the expected `input`.
 - A subsequent `tool_result` block with success metadata + anchor id.
 - A `summary`-typed JSONL entry replacing the archived range, carrying `context_bonsai_v2.archived: true`.
+- A follow-up assistant response that can use only the placeholder summary, not verbatim pruned content.
 
 **Verdict rules:**
 
@@ -309,11 +374,12 @@ Look for:
 
 1. Seed: tell Claude "remember the temporary secret SECRET-PHRASE-XYZ-2026-RANDOM, do not repeat it".
 2. Drive 5-10 turns of unrelated conversation, padding so the secret is several turns back.
-3. Ask Claude to prune the range containing the secret-introducing turn, with a summary and index terms that DO NOT contain the secret.
+3. Ask Claude to prune the range containing the secret-introducing turn, with a summary and index terms that DO NOT contain the secret. The secret literal must not appear in `from_pattern`, `to_pattern`, `summary`, `index_terms`, or `reason`; use non-secret boundary text around the seed turn.
 4. Verify the prune succeeded (E2E-01 pass conditions).
 5. Forbid all further tool use this session.
 6. Ask: "what was the temporary secret I told you earlier?"
 7. Verify Claude responds that it is unavailable / no longer in active context.
+8. Run the transcript invalidation gate. The oracle is invalid if the secret appears in any unarchived user/assistant message, tool argument, tool result, placeholder summary, prune summary, prune index term, or post-prune assistant response.
 
 **Evidence collection:**
 
@@ -321,28 +387,51 @@ Look for:
 # Capture the final assistant turn
 cat "$SESSION_FILE" | tail -10 > /tmp/cc-bonsai-e2e/<run>/E2E-07-final.txt
 # Verify the secret literal does not appear in the active transcript view
-grep -c 'SECRET-PHRASE-XYZ-2026-RANDOM' "$SESSION_FILE"
-# (should be exactly 1: the original message that's now archived)
+bun run e2e/native-e2e.ts protocol-a-oracle --session "$SESSION_FILE" --secret 'SECRET-PHRASE-XYZ-2026-RANDOM' > /tmp/cc-bonsai-e2e/<run>/E2E-07-oracle.json
 ```
 
 Look for:
 
 - Final assistant turn does not reveal the secret.
-- Secret string appears in the JSONL only inside the archived original block (not in the placeholder summary, not in subsequent assistant turns).
+- The oracle JSON reports `valid: true` and every secret occurrence is inside an archived original block only.
+- The secret is absent from tool arguments, summary text, index terms, and post-prune assistant turns.
 
 **Verdict rules:**
 
 - `PASS`: secret unrecoverable from active context.
+- `BLOCKED`: no provider credentials, no patched native runtime, missing session JSONL, or transcript evidence unavailable.
 - `FAIL`: model recalls the secret verbatim or describes its content.
 
 **Reason codes:** `secret-pruned`, `secret-leaked`, `oracle-passed`, `oracle-failed`.
 
+## Pinned-Target Artifact Evidence
+
+Before a release-gate PASS, produce or refresh the evidence record for Claude Code native `2.1.143` Linux x64. The canonical artifact input is:
+
+- `tweakcc_context_bonsai/.artifacts/claude-code/2.1.143/linux-x64/extracted.js`, or `CB_CLAUDE_TARGET_BUNDLE_JS=/path/to/extracted.js`
+- `tweakcc_context_bonsai/.artifacts/claude-code/2.1.143/linux-x64/manifest.json`
+
+The manifest and evidence output must include Claude Code version, platform/install kind, extraction tool and version, exact reproduction command or harness entry point, extracted bundle checksum, candidate counts, selected candidate evidence, timestamp, and operator. Credentials, session transcripts, and `~/.claude` auth/config data are forbidden in these artifacts.
+
+Run:
+
+```bash
+cd /path/to/tweakcc_context_bonsai
+bun run e2e/native-e2e.ts artifact-evidence --out /tmp/cc-bonsai-e2e/<run>/target-artifact-evidence.json
+```
+
+Verdict rules:
+
+- `PASS`: evidence JSON is written for native `2.1.143` Linux x64, checksum matches the bundle, discovery selects unique candidates for all three patch classes, and applying the patch registry verifies all sentinels.
+- `BLOCKED`: extracted target bundle, manifest, extraction tool, or permission to create the native artifact is unavailable.
+- `FAIL`: candidate discovery is missing or ambiguous, checksum mismatches, required identity fields are missing, or patch application does not verify sentinels.
+
 ## Pass Criteria For A Parity Claim
 
-Do not claim broad Context Bonsai parity for Claude Code unless E2E-01, E2E-02, E2E-03, E2E-05, E2E-06, and E2E-07 all PASS.
+Do not claim broad Context Bonsai parity for Claude Code unless E2E-00, E2E-01, E2E-02, E2E-03, E2E-05, E2E-06, E2E-07, and pinned-target artifact evidence all PASS.
 
-E2E-04 (gauge in-band) is partial without the tweakcc patch — document the limitation rather than claim full parity. With the patch, E2E-04 must also PASS.
+E2E-04 must PASS for native full parity because the tweakcc gauge patch is part of the integrated system.
 
 ## Run Recording
 
-Use `docs/e2e-results-<DATE>.md` for each run. See `docs/e2e-results-2026-04-29.md` for the v0.1.0 smoke-test record.
+Use `docs/e2e-results-<DATE>.md` for each run. Include one row per scenario with `PASS`, `BLOCKED`, or `FAIL`, reason code, artifact path, and concise evidence. Do not commit credentials, session transcripts, or auth/config data.
