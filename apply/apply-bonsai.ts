@@ -98,9 +98,6 @@ export async function applyBonsai(options: ApplyOptions = {}): Promise<ApplyResu
   const backupPath = options.backupPath ?? backupPathForInstallation(installation);
   const priorBackupExists = existsSync(backupPath);
 
-  await mkdir(dirname(backupPath), { recursive: true });
-  await api.backupFile(installation.path, backupPath);
-
   const originalContent = await api.readContent(installation);
   const state = classifyInstallState(
     originalContent,
@@ -113,6 +110,11 @@ export async function applyBonsai(options: ApplyOptions = {}): Promise<ApplyResu
   if (state === 'already-patched') {
     output.log(`Context Bonsai already patched at ${installation.path}`);
     return { installation, backupPath, state, patchesApplied: [], wroteContent: false };
+  }
+
+  if (!priorBackupExists) {
+    await mkdir(dirname(backupPath), { recursive: true });
+    await api.backupFile(installation.path, backupPath);
   }
 
   try {

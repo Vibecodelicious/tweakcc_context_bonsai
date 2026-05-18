@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmod, copyFile, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { chmod, copyFile, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -85,23 +85,33 @@ describe('apply harness', () => {
 
     const result = await applyBonsai(fakeOptions(api, [patchA, patchB]));
 
-    expect(calls).toEqual(['detect', 'backup', 'read', 'write']);
+    expect(calls).toEqual(['detect', 'read', 'backup', 'write']);
     expect(writtenContent).toBe(`source${patchA.sentinel}${patchB.sentinel}`);
     expect(result.state).toBe('unpatched');
     expect(result.patchesApplied).toEqual(['archived-filter', 'message-content-ids']);
     expect(result.wroteContent).toBe(true);
   });
 
-  test('does not write an already-patched install', async () => {
+  test('does not back up or write an already-patched install', async () => {
     const calls: string[] = [];
+    const dir = await mkdtemp(join(tmpdir(), 'cbonsai-already-patched-'));
+    tempDirs.push(dir);
+    const backupPath = join(dir, 'stock.backup');
+    await writeFile(backupPath, 'stock install backup');
     const api = fakeApi({
       calls,
       readContent: async () => `source${patchA.sentinel}`,
+      backupFile: async () => {
+        throw new Error('backup should not be called for already-patched installs');
+      },
     });
 
-    const result = await applyBonsai(fakeOptions(api, [patchA]));
+    const result = await applyBonsai({
+      ...fakeOptions(api, [patchA]),
+      backupPath,
+    });
 
-    expect(calls).toEqual(['detect', 'backup', 'read']);
+    expect(calls).toEqual(['detect', 'read']);
     expect(result.state).toBe('already-patched');
     expect(result.wroteContent).toBe(false);
   });
@@ -118,7 +128,7 @@ describe('apply harness', () => {
     const api = fakeApi({ calls, readContent: async () => 'source' });
 
     await expect(applyBonsai(fakeOptions(api, [failingPatch]))).rejects.toThrow('anchor not found');
-    expect(calls).toEqual(['detect', 'backup', 'read', 'restore']);
+    expect(calls).toEqual(['detect', 'read', 'backup', 'restore']);
   });
 
   test('restores from the selected backup path', async () => {
@@ -201,6 +211,7 @@ function fakeApi(overrides: {
   calls: string[];
   readContent?: TweakccApi['readContent'];
   writeContent?: TweakccApi['writeContent'];
+  backupFile?: TweakccApi['backupFile'];
 }): TweakccApi {
   return {
     findAllInstallations: async () => [installation],
@@ -208,8 +219,9 @@ function fakeApi(overrides: {
       overrides.calls.push('detect');
       return installation;
     },
-    backupFile: async () => {
+    backupFile: async (sourcePath, backupPath) => {
       overrides.calls.push('backup');
+      if (overrides.backupFile) await overrides.backupFile(sourcePath, backupPath);
     },
     readContent: async (install) => {
       overrides.calls.push('read');
