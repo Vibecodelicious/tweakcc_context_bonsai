@@ -88,7 +88,7 @@ export function selectUnique(
     throw new AnchorNotFoundError(`no anchor candidate reached minScore ${opts.minScore}`);
   }
 
-  if (second !== undefined && best.score - second.score < opts.minMargin) {
+  if (second !== undefined && best.score - second.score <= opts.minMargin) {
     throw new AnchorAmbiguousError(
       `ambiguous anchor candidates: top score ${best.score}, second score ${second.score}, minMargin ${opts.minMargin}`
     );
