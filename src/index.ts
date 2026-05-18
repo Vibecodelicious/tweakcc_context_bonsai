@@ -13,7 +13,7 @@ import { truncateCommand } from './commands/truncate';
 import { compactCommand } from './commands/compact';
 import { retrieveCommand } from './commands/retrieve';
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.1";
 
 function printUsage(): void {
   console.log(`ccsnap v${VERSION} - Claude Code Session Snapshot Tool
