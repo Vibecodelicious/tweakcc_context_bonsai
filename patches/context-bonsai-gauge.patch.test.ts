@@ -74,15 +74,11 @@ describe('injected context gauge behavior', () => {
 
   test('fires on prune/retrieve tool responses and decodes metadata with Buffer', () => {
     const runtime = buildPatchedRuntime({ usedTokens: 100, usableBudget: 1000 });
-    const metadata = Buffer.from(
-      JSON.stringify({ op: 'prune', anchor_id: 'a', range_end_id: 'b', placeholder_text: 'p' }),
-      'utf8'
-    ).toString('base64');
     const messages = [
       {
         type: 'user',
         message: {
-          content: `<context-bonsai-tool-response encoding="base64">${metadata}</context-bonsai-tool-response>`,
+          content: encodedToolResponse({ op: 'prune', anchor_id: 'a', range_end_id: 'b' }),
         },
       },
     ];
@@ -92,6 +88,26 @@ describe('injected context gauge behavior', () => {
     const gauge = findGaugeAttachment(attachments);
     expect(gauge).toBeDefined();
     expect(gauge!.text).toContain('A context-bonsai prune/retrieve result was just observed.');
+  });
+
+  test('does not repeatedly force gauges from the same retained bonsai wrapper', () => {
+    const runtime = buildPatchedRuntime({ usedTokens: 100, usableBudget: 1000 });
+    const retainedWrapper = encodedToolResponse({ op: 'prune', anchor_id: 'a', range_end_id: 'b' });
+    const messages = [{ type: 'user', message: { content: retainedWrapper } }];
+    const firstAttachments: Array<{ type: string; text: string }> = [];
+    const secondAttachments: Array<{ type: string; text: string }> = [];
+    const thirdAttachments: Array<{ type: string; text: string }> = [];
+
+    runtime.registerAttachments(firstAttachments, messages);
+    runtime.registerAttachments(secondAttachments, messages);
+    runtime.registerAttachments(thirdAttachments, [
+      ...messages,
+      { type: 'user', message: { content: encodedToolResponse({ op: 'retrieve', anchor_id: 'c', range_end_id: 'd' }) } },
+    ]);
+
+    expect(findGaugeAttachment(firstAttachments)).toBeDefined();
+    expect(findGaugeAttachment(secondAttachments)).toBeUndefined();
+    expect(findGaugeAttachment(thirdAttachments)).toBeDefined();
   });
 
   test('graduates severity bands through prune-ready, strong, and urgent guidance', () => {
@@ -125,6 +141,11 @@ function findGaugeAttachment(
   attachments: Array<{ type: string; text: string }>
 ): { type: string; text: string } | undefined {
   return attachments.find((attachment) => attachment.type === 'context-bonsai-gauge');
+}
+
+function encodedToolResponse(metadata: { op: 'prune' | 'retrieve'; anchor_id: string; range_end_id: string }): string {
+  const encoded = Buffer.from(JSON.stringify({ ...metadata, placeholder_text: 'p' }), 'utf8').toString('base64');
+  return `<context-bonsai-tool-response encoding="base64">${encoded}</context-bonsai-tool-response>`;
 }
 
 function composedRuntimeBundle(): string {
