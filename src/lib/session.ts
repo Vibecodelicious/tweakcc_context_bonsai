@@ -61,6 +61,10 @@ export async function findCurrentSession(projectPath: string): Promise<HistoryEn
   // Print-mode sessions can create the JSONL before history.jsonl is updated.
   // Fall back to the newest session file under the project's session dir.
   const projectDir = getProjectDir(projectPath);
+  if (!(await Bun.file(projectDir).exists())) {
+    return null;
+  }
+
   const sessionGlob = new Glob('*.jsonl');
   let newestPath: string | null = null;
   let newestMtime = -1;
@@ -517,6 +521,10 @@ export async function getMessageRange(
  */
 export async function findSessionPath(sessionId: string): Promise<string> {
   const projectsDir = `${homedir()}/.claude/projects`;
+  if (!(await Bun.file(projectsDir).exists())) {
+    throw new Error(`Session not found: ${sessionId}`);
+  }
+
   const glob = new Glob(`*/${sessionId}.jsonl`);
 
   for await (const match of glob.scan({ cwd: projectsDir, absolute: true })) {

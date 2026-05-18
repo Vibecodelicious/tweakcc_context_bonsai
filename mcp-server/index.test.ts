@@ -4,8 +4,12 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { getArchivedMarkerPath, markMessagesArchived } from "../src/lib/compact";
 import {
+  ARCHIVED_FILTER_SENTINEL,
+  PATCH_MISSING_ERROR,
+  archivedFilterPatchPresentInAny,
   encodeToolResponseMetadata,
   finalizeRetrieveAfterMutation,
+  fileContainsSentinel,
   isIdSelectorPattern,
   listContextBonsaiTools,
   loadSearchableMessages,
@@ -16,12 +20,17 @@ import {
 } from "./index";
 
 let testDir = "";
+let markerPaths: string[] = [];
 
 afterEach(async () => {
   if (testDir) {
     await rm(testDir, { recursive: true, force: true });
     testDir = "";
   }
+  for (const markerPath of markerPaths) {
+    await rm(markerPath, { force: true });
+  }
+  markerPaths = [];
 });
 
 async function createSession(sessionId: string): Promise<string> {
@@ -132,6 +141,7 @@ describe("context-bonsai-v2 validation", () => {
     const sessionId = `test-session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const sessionPath = await createSession(sessionId);
     const markerPath = getArchivedMarkerPath(sessionId);
+    markerPaths.push(markerPath);
 
     await rm(markerPath, { force: true });
     await markMessagesArchived(sessionPath, "msg-1", "msg-2", "summary-uuid", { skipWrite: true });
@@ -198,6 +208,93 @@ describe("context-bonsai-v2 validation", () => {
       "context-bonsai-prune",
       "context-bonsai-retrieve",
     ]);
+  });
+});
+
+describe("patch-presence guard", () => {
+  test("scans native ELF-shaped executable bytes for the archived-filter sentinel", async () => {
+    testDir = join(tmpdir(), `mcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(testDir, { recursive: true });
+    const nativePath = join(testDir, "claude-native");
+    await writeFile(nativePath, Buffer.concat([
+      Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x01]),
+      Buffer.from(`bundle ${ARCHIVED_FILTER_SENTINEL} tail`, "utf8"),
+    ]));
+
+    expect(await fileContainsSentinel(nativePath, ARCHIVED_FILTER_SENTINEL)).toBe(true);
+    expect(await archivedFilterPatchPresentInAny([nativePath])).toBe(true);
+  });
+
+  test("scans npm cli.js text for the archived-filter sentinel", async () => {
+    testDir = join(tmpdir(), `mcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(testDir, { recursive: true });
+    const cliPath = join(testDir, "cli.js");
+    await writeFile(cliPath, `#!/usr/bin/env node\n${ARCHIVED_FILTER_SENTINEL}\n`, "utf8");
+
+    expect(await fileContainsSentinel(cliPath, ARCHIVED_FILTER_SENTINEL)).toBe(true);
+    expect(await archivedFilterPatchPresentInAny([cliPath])).toBe(true);
+  });
+
+  test("returns false when the sentinel is absent", async () => {
+    testDir = join(tmpdir(), `mcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(testDir, { recursive: true });
+    const cliPath = join(testDir, "cli.js");
+    await writeFile(cliPath, "#!/usr/bin/env node\nconsole.log('stock claude');\n", "utf8");
+
+    expect(await fileContainsSentinel(cliPath, ARCHIVED_FILTER_SENTINEL)).toBe(false);
+    expect(await archivedFilterPatchPresentInAny([cliPath])).toBe(false);
+  });
+
+  test("prune fails closed before marker or JSONL writes when patch sentinel is absent", async () => {
+    const sessionId = `test-session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const sessionPath = await createSession(sessionId);
+    const markerPath = getArchivedMarkerPath(sessionId);
+    markerPaths.push(markerPath);
+    const before = await Bun.file(sessionPath).text();
+    await rm(markerPath, { force: true });
+
+    const response = await routeContextBonsaiTool(
+      "context-bonsai-prune",
+      {
+        from_pattern: "start",
+        to_pattern: "end",
+        summary: "summary",
+        index_terms: ["topic"],
+      },
+      {
+        discoverSessionPath: async () => sessionPath,
+        assertArchivedFilterPatchPresent: async () => false,
+      }
+    );
+
+    expect(response).toEqual({ content: [{ type: "text", text: PATCH_MISSING_ERROR }] });
+    expect(await Bun.file(sessionPath).text()).toBe(before);
+    expect(await Bun.file(markerPath).exists()).toBe(false);
+  });
+
+  test("prune proceeds when patch sentinel is present", async () => {
+    const sessionId = `test-session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const sessionPath = await createSession(sessionId);
+    const markerPath = getArchivedMarkerPath(sessionId);
+    markerPaths.push(markerPath);
+    await rm(markerPath, { force: true });
+
+    const response = await routeContextBonsaiTool(
+      "context-bonsai-prune",
+      {
+        from_pattern: "start",
+        to_pattern: "end",
+        summary: "summary",
+        index_terms: ["topic"],
+      },
+      {
+        discoverSessionPath: async () => sessionPath,
+        assertArchivedFilterPatchPresent: async () => true,
+      }
+    );
+
+    expect(response.content[0]?.text).toContain("Prune complete. anchor_id=msg-1");
+    expect(await Bun.file(markerPath).json()).toEqual(["msg-1", "msg-2"]);
   });
 });
 

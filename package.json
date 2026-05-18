@@ -1,6 +1,6 @@
 {
   "name": "tweakcc-context-bonsai",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Context Bonsai for Claude Code: ccsnap CLI + the context-bonsai MCP server (tweakcc).",
   "bin": {
@@ -19,6 +19,7 @@
     "typescript": "^5.0.0"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "tweakcc": "^4.0.13"
   }
 }

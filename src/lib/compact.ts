@@ -550,6 +550,10 @@ export async function unarchiveMessages(
     }
 
     const message = allMessages[index];
+    if (!message) {
+      errors.push(`not found: ${uuid}`);
+      continue;
+    }
 
     if (message.type === 'summary' && message.compactMetadata) {
       summaryUuids.push({ uuid, index, message });
@@ -591,6 +595,7 @@ export async function unarchiveMessages(
     for (let i = fromIndex; i <= toIndex; i++) {
       const msg = allMessages[i];
       if (
+        msg &&
         (msg.type === 'user' || msg.type === 'assistant') &&
         msg.archivedBy === summaryUuid
       ) {
@@ -626,6 +631,9 @@ export async function unarchiveMessages(
     if (unarchiveSet.has(i)) {
       // Remove archive flags
       const message = allMessages[i];
+      if (!message) {
+        continue;
+      }
       const unarchived = { ...message };
       if (unarchived.type === 'user' || unarchived.type === 'assistant') {
         delete unarchived.archived;
@@ -635,7 +643,10 @@ export async function unarchiveMessages(
       outputMessages.push(unarchived as SessionMessage);
       unarchivedMessages.push(unarchived as SessionMessage);
     } else {
-      outputMessages.push(allMessages[i]);
+      const message = allMessages[i];
+      if (message) {
+        outputMessages.push(message);
+      }
     }
   }
 

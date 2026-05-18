@@ -78,7 +78,7 @@ This is ready to orchestrate whenever you want.
 Before calling it shipped, test the full workflow in a real Claude Code session:
 
 1. Apply Context Bonsai patches with `bun run apply`
-2. Register MCP server in the Claude Code MCP configuration file verified by Story 7
+2. Register MCP server in `~/.claude.json` (Story 7 verified top-level and per-project `mcpServers` maps in current Claude Code 2.1.x)
 3. Start a Claude Code session, generate some conversation
 4. Ask Claude to prune a uniquely bounded message range with `context-bonsai-prune`
 5. Verify archived messages disappear from the UI

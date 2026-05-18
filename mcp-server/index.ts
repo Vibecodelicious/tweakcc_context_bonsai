@@ -6,14 +6,18 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { createReadStream } from "fs";
 import { rename, writeFile } from "fs/promises";
 import { readlink } from "fs/promises";
-import { join } from "path";
+import { isAbsolute, resolve } from "path";
 import { findCurrentSession, findSessionPath, readSessionMessages } from "../src/lib/session";
 import { addArchivedMarkerEntries, markMessagesArchived, retrieveSession } from "../src/lib/compact";
 import type { SessionMessage, CompactMetadata } from "../src/types";
 
+export const ARCHIVED_FILTER_SENTINEL = "/*cb:archived-filter:v1*/";
 const COMPATIBILITY_ERROR = "Compatibility error: unable to access active session.";
+export const PATCH_MISSING_ERROR =
+  'Error: Context Bonsai archived-filter patch is not present in the running Claude Code executable. Run "cd tweakcc_context_bonsai && bun run apply" to re-apply the patches, then retry prune.';
 const MATCHER_AMBIGUOUS_FROM =
   "Error: from_pattern matched multiple messages. Provide a more specific pattern.";
 const MATCHER_AMBIGUOUS_TO =
@@ -59,6 +63,18 @@ interface PruneArgs {
 
 interface RetrieveArgs {
   anchor_id?: unknown;
+}
+
+interface ClaudeProcessContext {
+  pid: string;
+  sessionId: string;
+  cwd?: string;
+  executableCandidates: string[];
+}
+
+interface PruneDependencies {
+  discoverSessionPath: () => Promise<string>;
+  assertArchivedFilterPatchPresent: () => Promise<boolean>;
 }
 
 interface ToolResponseMetadata {
@@ -117,6 +133,157 @@ function plainText(text: string): { content: Array<{ type: "text"; text: string 
 export function encodeToolResponseMetadata(metadata: ToolResponseMetadata): string {
   const encoded = Buffer.from(JSON.stringify(metadata), "utf8").toString("base64");
   return `<context-bonsai-tool-response encoding="base64">${encoded}</context-bonsai-tool-response>`;
+}
+
+async function readParentPid(pid: string): Promise<string | null> {
+  try {
+    const stat = await Bun.file(`/proc/${pid}/stat`).text();
+    const end = stat.lastIndexOf(")");
+    if (end === -1) {
+      return null;
+    }
+
+    const fields = stat.slice(end + 2).split(" ");
+    return fields[1] && !Number.isNaN(Number(fields[1])) ? fields[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+function splitProcCmdline(cmdline: string): string[] {
+  return cmdline.split("\0").filter((part) => part.length > 0);
+}
+
+function sessionIdFromArgv(argv: string[]): string | null {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--resume" || arg === "resume") {
+      const next = argv[i + 1];
+      if (next && /^[a-f0-9-]+$/i.test(next)) {
+        return next;
+      }
+    }
+
+    const inline = arg?.match(/^--resume=(?<sessionId>[a-f0-9-]+)$/i);
+    if (inline?.groups?.sessionId) {
+      return inline.groups.sessionId;
+    }
+  }
+
+  return null;
+}
+
+function executableCandidatesFromArgv(argv: string[], cwd?: string): string[] {
+  const candidates: string[] = [];
+
+  for (const arg of argv) {
+    if (!arg || arg.startsWith("-")) {
+      continue;
+    }
+
+    if (arg.endsWith("cli.js") || arg.includes("@anthropic-ai/claude-code")) {
+      candidates.push(isAbsolute(arg) ? arg : resolve(cwd ?? process.cwd(), arg));
+    }
+  }
+
+  return candidates;
+}
+
+async function findClaudeProcessContext(): Promise<ClaudeProcessContext | null> {
+  let currentPid = String(process.pid);
+
+  for (let depth = 0; depth < 10; depth += 1) {
+    const parentPid = await readParentPid(currentPid);
+    if (!parentPid || parentPid === "0" || parentPid === "1") {
+      break;
+    }
+
+    let cmdline = "";
+    let argv: string[] = [];
+    try {
+      cmdline = await Bun.file(`/proc/${parentPid}/cmdline`).text();
+      argv = splitProcCmdline(cmdline);
+    } catch {
+      argv = [];
+    }
+
+    const sessionId = sessionIdFromArgv(argv);
+    if (sessionId) {
+      let cwd: string | undefined;
+      try {
+        cwd = await readlink(`/proc/${parentPid}/cwd`);
+      } catch {
+        cwd = undefined;
+      }
+
+      const executableCandidates = executableCandidatesFromArgv(argv, cwd);
+      try {
+        executableCandidates.push(await readlink(`/proc/${parentPid}/exe`));
+      } catch {
+        // Non-Linux or restricted /proc: fall back to cmdline-derived candidates.
+      }
+
+      return {
+        pid: parentPid,
+        sessionId,
+        cwd,
+        executableCandidates: [...new Set(executableCandidates)],
+      };
+    }
+
+    currentPid = parentPid;
+  }
+
+  return null;
+}
+
+export async function resolveRunningClaudeExecutableCandidates(): Promise<string[]> {
+  return (await findClaudeProcessContext())?.executableCandidates ?? [];
+}
+
+export async function fileContainsSentinel(path: string, sentinel: string): Promise<boolean> {
+  const needle = Buffer.from(sentinel, "utf8");
+  let carry = Buffer.alloc(0);
+
+  return await new Promise<boolean>((resolvePromise, reject) => {
+    const stream = createReadStream(path);
+    stream.on("data", (chunk) => {
+      const buffer = Buffer.concat([carry, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+      if (buffer.includes(needle)) {
+        stream.destroy();
+        resolvePromise(true);
+        return;
+      }
+
+      carry = buffer.subarray(Math.max(0, buffer.length - needle.length + 1));
+    });
+    stream.on("error", reject);
+    stream.on("close", () => resolvePromise(false));
+    stream.on("end", () => resolvePromise(false));
+  });
+}
+
+export async function archivedFilterPatchPresentInAny(paths: string[]): Promise<boolean> {
+  for (const path of paths) {
+    try {
+      if (await fileContainsSentinel(path, ARCHIVED_FILTER_SENTINEL)) {
+        return true;
+      }
+    } catch {
+      // Try the next candidate; unreadable candidates are treated as absent.
+    }
+  }
+
+  return false;
+}
+
+async function assertRunningClaudeHasArchivedFilterPatch(): Promise<boolean> {
+  const candidates = await resolveRunningClaudeExecutableCandidates();
+  if (candidates.length === 0) {
+    return false;
+  }
+
+  return archivedFilterPatchPresentInAny(candidates);
 }
 
 function successResponse(text: string, metadata: ToolResponseMetadata): {
@@ -247,37 +414,17 @@ export function resolveUniqueBoundary(
 }
 
 async function discoverSessionPath(): Promise<string> {
-  const readParentPid = async (pid: string): Promise<string | null> => {
-    try {
-      const stat = await Bun.file(`/proc/${pid}/stat`).text();
-      const end = stat.lastIndexOf(")");
-      if (end === -1) {
-        return null;
-      }
-
-      const fields = stat.slice(end + 2).split(" ");
-      return fields[1] && !Number.isNaN(Number(fields[1])) ? fields[1] : null;
-    } catch {
-      return null;
-    }
-  };
+  const claudeProcess = await findClaudeProcessContext();
+  if (claudeProcess) {
+    return await findSessionPath(claudeProcess.sessionId);
+  }
 
   let currentPid = String(process.pid);
 
-  for (let depth = 0; depth < 10; depth++) {
+  for (let depth = 0; depth < 10; depth += 1) {
     const parentPid = await readParentPid(currentPid);
     if (!parentPid || parentPid === "0" || parentPid === "1") {
       break;
-    }
-
-    try {
-      const cmdline = await Bun.file(`/proc/${parentPid}/cmdline`).text();
-      const resumeMatch = cmdline.match(/resume\0([a-f0-9-]+)/);
-      if (resumeMatch?.[1]) {
-        return await findSessionPath(resumeMatch[1]);
-      }
-    } catch {
-      // Continue to cwd-based fallback for this ancestor.
     }
 
     try {
@@ -387,15 +534,25 @@ export function validatePruneArgs(args: PruneArgs):
   };
 }
 
-async function handlePruneContext(args: PruneArgs): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+async function handlePruneContext(
+  args: PruneArgs,
+  deps: PruneDependencies = {
+    discoverSessionPath,
+    assertArchivedFilterPatchPresent: assertRunningClaudeHasArchivedFilterPatch,
+  }
+): Promise<{ content: Array<{ type: "text"; text: string }> }> {
   const validated = validatePruneArgs(args);
   if (!validated.ok) {
     return plainText(validated.error);
   }
 
+  if (!(await deps.assertArchivedFilterPatchPresent())) {
+    return plainText(PATCH_MISSING_ERROR);
+  }
+
   let sessionPath: string;
   try {
-    sessionPath = await discoverSessionPath();
+    sessionPath = await deps.discoverSessionPath();
   } catch {
     return plainText(COMPATIBILITY_ERROR);
   }
@@ -635,10 +792,15 @@ export function listContextBonsaiTools() {
 
 export async function routeContextBonsaiTool(
   name: string,
-  args: unknown
+  args: unknown,
+  deps?: Partial<PruneDependencies>
 ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
   if (name === "context-bonsai-prune") {
-    return handlePruneContext((args as PruneArgs) || {});
+    return handlePruneContext((args as PruneArgs) || {}, {
+      discoverSessionPath: deps?.discoverSessionPath ?? discoverSessionPath,
+      assertArchivedFilterPatchPresent:
+        deps?.assertArchivedFilterPatchPresent ?? assertRunningClaudeHasArchivedFilterPatch,
+    });
   }
 
   if (name === "context-bonsai-retrieve") {
@@ -650,7 +812,7 @@ export async function routeContextBonsaiTool(
 const server = new Server(
   {
     name: "context-bonsai-v2",
-    version: "2.0.0",
+    version: "0.1.1",
   },
   {
     capabilities: {
