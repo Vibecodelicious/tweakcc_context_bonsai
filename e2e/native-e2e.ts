@@ -18,7 +18,32 @@ import { composePatches, verifyPatchSentinels } from '../apply/apply-bonsai';
 
 const defaultBundlePath = '.artifacts/claude-code/2.1.143/linux-x64/extracted.js';
 const defaultManifestPath = '.artifacts/claude-code/2.1.143/linux-x64/manifest.json';
+const semanticReportPath = 'docs/semantic-anchor-analysis-2.1.143.md';
 const targetBundleEnv = 'CB_CLAUDE_TARGET_BUNDLE_JS';
+
+const requiredSemanticSections = [
+  'archived-filter.visibility',
+  'message-content-ids.converter',
+  'context-bonsai-gauge.token-usage',
+  'context-bonsai-gauge.attachment-pipeline',
+  'context-bonsai-gauge.reminder-render',
+  'runtime-helper.fs',
+  'runtime-helper.config-dir',
+  'runtime-helper.session-id',
+];
+
+const requiredSemanticFields = [
+  'Anchor ID',
+  'Patch or helper',
+  'Pinned artifact identity',
+  'Selected offset and snippet',
+  'Host behavior controlled',
+  'Required seam rationale',
+  'Plausible wrong candidates rejected',
+  'Ambiguous/no-match fail-closed evidence',
+  'Runtime or model-facing evidence',
+  'Reviewer checklist',
+];
 
 interface EvidenceSelection {
   candidateCount: number;
@@ -62,6 +87,7 @@ async function artifactEvidence(args: Args): Promise<void> {
   if (!existsSync(manifestPath)) {
     throw new Error(`missing target manifest: expected ${manifestPath}`);
   }
+  const semanticReport = await validateSemanticReport();
 
   const content = await readFile(bundlePath, 'utf8');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
@@ -100,10 +126,64 @@ async function artifactEvidence(args: Args): Promise<void> {
     },
     selections,
     sentinelsVerified: bonsaiPatches.map((patch) => patch.sentinel),
+    semanticAnchorAnalysis: semanticReport,
+    releaseReadiness:
+      'artifact evidence is release-ready only for pinned extracted-bundle semantic analysis; live provider/model proof remains Story 8 BLOCKED until fresh-sprite login and Protocol A run',
     credentialBoundary: 'No credentials, auth files, session transcripts, or ~/.claude config are read by this command.',
   };
 
   await writeJson(args.out, evidence);
+}
+
+async function validateSemanticReport(): Promise<{ path: string; sha256: string; requiredSections: string[]; requiredFields: string[] }> {
+  if (!existsSync(semanticReportPath)) {
+    throw new Error(
+      `missing semantic anchor analysis report: expected ${semanticReportPath}; ` +
+        'artifact-evidence is mechanical locator evidence only and is not release-gate-ready without semantic analysis'
+    );
+  }
+
+  const text = await readFile(semanticReportPath, 'utf8');
+  const missing: string[] = [];
+  for (const section of requiredSemanticSections) {
+    if (!new RegExp(`^##\\s+${escapeRegExp(section)}\\s*$`, 'm').test(text)) missing.push(`section:${section}`);
+  }
+  for (const field of requiredSemanticFields) {
+    for (const section of requiredSemanticSections) {
+      const sectionText = extractSection(text, section);
+      if (!sectionText.includes(`${field}:`)) missing.push(`${section}:${field}`);
+    }
+  }
+  if (!/mechanical locator evidence/i.test(text) || !/not release-gate/i.test(text)) {
+    missing.push('reclassification:mechanical locator evidence/not release-gate');
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      `incomplete semantic anchor analysis report: ${missing.join(', ')}; ` +
+        'artifact-evidence is not release-gate-ready'
+    );
+  }
+
+  return {
+    path: semanticReportPath,
+    sha256: sha256(text),
+    requiredSections: requiredSemanticSections,
+    requiredFields: requiredSemanticFields,
+  };
+}
+
+function extractSection(text: string, section: string): string {
+  const match = new RegExp(`^##\\s+${escapeRegExp(section)}\\s*$`, 'm').exec(text);
+  if (!match) return '';
+  const start = match.index;
+  const rest = text.slice(start + match[0].length);
+  const next = /^##\s+/m.exec(rest);
+  return next ? rest.slice(0, next.index) : rest;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 async function protocolAOracle(args: Args): Promise<void> {

@@ -28,7 +28,7 @@
 | E2E-05 Compatibility error path | BLOCKED | `credentials-missing-in-harness` | Blocked by missing live Claude Code login in the fresh sprite. |
 | E2E-06 Persistence across resume | BLOCKED | `credentials-missing-in-harness` | Blocked by missing live Claude Code login in the fresh sprite. |
 | E2E-07 Secret prune oracle / Protocol A | BLOCKED | `credentials-missing-in-harness` | Blocked by missing live Claude Code login in the fresh sprite; no secret was seeded and no transcript was produced. |
-| Pinned-target artifact evidence | PASS | `artifact-selection-pass` | Extracted native `2.1.143` bundle via tweakcc `readContent` (`14548665` bytes, sha256 `7ee77e22cde2618030c26182d43d8be82f68cbb2ed063f72778c1a5986d0943a`), then `bun run e2e/native-e2e.ts artifact-evidence --out .artifacts/claude-code/2.1.143/linux-x64/evidence-story8-rerun.json` exited 0. Candidate counts/selections: archived-filter `132` candidates selected index `11170978` score `103`; message-content-ids `24` selected index `12350099` score `75`; gauge token usage `9` selected index `5232907` score `45`; gauge attachment `10` selected index `9748034` score `50`; gauge reminder render `1` selected index `9972435` score `35`. Sentinels verified: `/*cb:archived-filter:v1*/`, `/*cb:message-content-ids:v1*/`, `/*cb:context-bonsai-gauge:v1*/`. |
+| Pinned-target artifact evidence | PASS, reclassified | `mechanical-locator-evidence-only` | This prior PASS is mechanical locator evidence only, not release-gate acceptance evidence and not final Story 8 PASS. It extracted native `2.1.143` via tweakcc `readContent` (`14548665` bytes, sha256 `7ee77e22cde2618030c26182d43d8be82f68cbb2ed063f72778c1a5986d0943a`) and verified candidate counts/selections plus sentinels, but it did not include semantic anchor analysis of provider-bound/model-visible behavior or plausible wrong candidates. Story 8A supersedes this row with `docs/semantic-anchor-analysis-2.1.143.md`; live provider/model proof remains BLOCKED until fresh-sprite login and Protocol A run. |
 
 ## Artifact Notes
 
@@ -38,7 +38,7 @@
 
 ## Release-Gate Finding
 
-The approved pinned-native apply and target-artifact blockers are fixed in this rerun, but E2E-00 remains `BLOCKED` because its functional prune/model-context-reduction proof could not run without fresh-sprite Claude Code login. The full Story 8 release gate remains `BLOCKED` until the fresh-sprite harness has a live Claude Code login and the model-visible scenarios E2E-01..07, including Protocol A, are rerun.
+The approved pinned-native apply and target-artifact blockers are fixed in this rerun, but E2E-00 remains `BLOCKED` because its functional prune/model-context-reduction proof could not run without fresh-sprite Claude Code login. The prior pinned-target artifact PASS is now explicitly mechanical locator evidence only and not release-gate evidence; the full Story 8 release gate remains `BLOCKED` until semantic anchor evidence is linked and the fresh-sprite harness has a live Claude Code login with model-visible scenarios E2E-01..07, including Protocol A, rerun.
 
 # Test Run: 2026-05-18T16:12:58Z
 

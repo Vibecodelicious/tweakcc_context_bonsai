@@ -9,7 +9,10 @@ import { BonsaiPatchError } from './types';
 const identifier = String.raw`[$A-Z_a-z][$\w]*`;
 
 const visibilitySwitchPatterns = [
-  new RegExp(String.raw`switch\(\s*(${identifier})\.type\s*\)\s*\{[^}]+\}`, 'g'),
+  new RegExp(
+    String.raw`let\s+${identifier}\s*=\s*(${identifier})\.map\s*\(\s*\([^)]*\)\s*=>\s*\{(?=[\s\S]{0,900}\bBp5\s*\()(?=[\s\S]{0,900}\bpp5\s*\()[\s\S]{0,900}?return\s+pp5\s*\(`,
+    'g'
+  ),
 ];
 
 const converterPatterns = [
@@ -60,6 +63,10 @@ const reminderRenderPatterns = [
   ),
 ];
 
+// These selectors mechanize the semantic anchor choices documented in
+// docs/semantic-anchor-analysis-2.1.143.md; scorer output is supporting
+// locator evidence, not proof that an anchor is behaviorally correct.
+
 export interface EvidenceAnchor {
   candidateCount: number;
   selected: Candidate;
@@ -77,11 +84,11 @@ export type ReminderRenderAnchor = Candidate & { attachmentVar: string; evidence
 
 export function selectVisibilitySwitchAnchor(content: string): VisibilitySwitchAnchor {
   const evidence = selectAnchorEvidence(content, visibilitySwitchPatterns, visibilitySwitchScorer, {
-    minScore: 20,
+    minScore: 30,
     minMargin: 10,
   });
-  const messageVar = new RegExp(String.raw`switch\(\s*(${identifier})\.type\s*\)`).exec(evidence.selected.text)?.[1];
-  if (!messageVar) throw new BonsaiPatchError('archived-filter', 'selected visibility switch did not expose a message variable');
+  const messageVar = new RegExp(String.raw`let\s+${identifier}\s*=\s*(${identifier})\.map`).exec(evidence.selected.text)?.[1];
+  if (!messageVar) throw new BonsaiPatchError('archived-filter', 'selected provider message map did not expose a messages variable');
   return { ...evidence.selected, messageVar, evidence };
 }
 
@@ -137,27 +144,22 @@ function selectAnchorEvidence(
 
 function visibilitySwitchScorer(content: string, candidate: Candidate): number {
   let score = 0;
-  if (/case["']user["']/.test(candidate.text)) score += 15;
-  if (/case["']assistant["']/.test(candidate.text)) score += 15;
-  if (/\bmessage\b/.test(candidate.text)) score += 5;
-  if (/\bcontent\b/.test(candidate.text)) score += 5;
-  if (/tool_use/.test(candidate.text)) score += 3;
+  if (/\.map\s*\(/.test(candidate.text)) score += 10;
+  if (/\.type\s*===\s*["']user["']/.test(candidate.text)) score += 15;
+  if (/\bBp5\s*\(/.test(candidate.text)) score += 20;
+  if (/\bpp5\s*\(/.test(candidate.text)) score += 20;
+  if (/\brole\s*===\s*["']user["']/.test(candidate.text)) score += 10;
 
   const before = content.slice(Math.max(0, candidate.index - 160), candidate.index);
-  const after = content.slice(candidate.index, candidate.index + 1400);
-  if (/if\([^)]*===\s*["']transcript["']\)return!0;?\s*$/.test(before)) score += 30;
-  if (/resolvedToolUseIDs/.test(after)) score += 15;
-  if (/case["']grouped_tool_use["']/.test(after)) score += 12;
-  if (/case["']collapsed_read_search["']/.test(after)) score += 12;
-  if (/case["']system["'][\s\S]{0,260}api_error/.test(after)) score += 10;
-  if (/toolUseID|tool_use_id/.test(after)) score += 8;
-  if (/case["']attachment["']/.test(after)) score += 6;
-  if (!/case["']user["']/.test(candidate.text) || !/case["']assistant["']/.test(candidate.text)) score -= 20;
-  if (!/transcript/.test(before) && !/resolvedToolUseIDs|grouped_tool_use|collapsed_read_search/.test(after)) score -= 30;
+  const after = content.slice(candidate.index, candidate.index + 1800);
+  if (/tengu_api_cache_breakpoints/.test(before)) score += 15;
+  if (/cache_control/.test(after)) score += 10;
+  if (/return\s+[^;]+;?\s*}\s*function\s+\w+\s*\(/.test(after)) score += 5;
+  if (/resolvedToolUseIDs|collapsed_read_search|if\([^)]*===\s*["']transcript["']\)/.test(candidate.text)) score -= 50;
   return score;
 }
 
-function messageConverterScorer(_content: string, candidate: Candidate): number {
+function messageConverterScorer(content: string, candidate: Candidate): number {
   let score = 0;
   if (/\buuid\b/.test(candidate.text)) score += 15;
   if (/\bcontent\s*:/.test(candidate.text)) score += 15;
@@ -171,6 +173,8 @@ function messageConverterScorer(_content: string, candidate: Candidate): number 
   if (/\b(?:id|uuid)\s*:\s*\w+\.uuid\b/.test(candidate.text)) score += 10;
   if (/\bmetadata\s*:\s*\{\s*uuid\b/.test(candidate.text)) score += 10;
   if (/typeof\s+\w+\.message\.content\s*===\s*["']string["']/.test(candidate.text)) score += 10;
+  const after = content.slice(candidate.index, candidate.index + 700);
+  if (/\bcache_control\b/.test(after) && /\bttl\b/.test(after)) score += 15;
   if (/\brole\s*:\s*["']system["']/.test(candidate.text)) score -= 25;
   if (/\.map\s*\(/.test(candidate.text)) score -= 40;
   return score;

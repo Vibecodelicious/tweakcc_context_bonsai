@@ -93,8 +93,10 @@ function buildPatchedConverter(configDir: string): (message: { type: string; uui
 
 function composedRuntimeBundle(): string {
   return `${runtimeHelpersOnly()}
-function toolUseId(X){if(X.type==="assistant")return X.message.content[0]?.id;if(X.type==="user")return X.message.content[0]?.tool_use_id;return X.toolUseID}
-function visibilityPredicate(X,$,q,K,_,A){if(_==="transcript")return!0;switch(X.type){case"attachment":case"user":case"assistant":{let z=toolUseId(X);if(!z)return X.message&&X.message.content||X.tool_use;return A.resolvedToolUseIDs.has(z)}case"system":return X.subtype!=="api_error";case"grouped_tool_use":return A.resolvedToolUseIDs.has(X.message.content[0].id);case"collapsed_read_search":return false}}
+function d(){}
+function Bp5(X){return{role:"user",content:X.message.content}}
+function pp5(X){return{role:"assistant",content:X.message.content}}
+function providerMap(messages,cache,ttl){d("tengu_api_cache_breakpoints",{});let D=messages.map((X,L)=>{let P=L===0;if(X.type==="user")return Bp5(X,P,cache,ttl);if(X.type==="api_system")return{role:"system",content:X.message.content};return pp5(X,P,cache,ttl)});if(cache){D[0].content=[{type:"text",text:"x",cache_control:{ttl}}]}return D}
 function convertMessage(M){return{role:M.type,content:M.message.content,id:M.uuid,metadata:{uuid:M.uuid}}}`;
 }
 
