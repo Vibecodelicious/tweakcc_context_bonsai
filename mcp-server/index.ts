@@ -238,7 +238,54 @@ async function findClaudeProcessContext(): Promise<ClaudeProcessContext | null> 
 }
 
 export async function resolveRunningClaudeExecutableCandidates(): Promise<string[]> {
-  return (await findClaudeProcessContext())?.executableCandidates ?? [];
+  const claudeProcess = await findClaudeProcessContext();
+  if (claudeProcess) {
+    return claudeProcess.executableCandidates;
+  }
+
+  return findClaudeAncestorExecutableCandidates();
+}
+
+async function findClaudeAncestorExecutableCandidates(): Promise<string[]> {
+  const candidates: string[] = [];
+  let currentPid = String(process.pid);
+
+  for (let depth = 0; depth < 10; depth += 1) {
+    const parentPid = await readParentPid(currentPid);
+    if (!parentPid || parentPid === "0" || parentPid === "1") {
+      break;
+    }
+
+    let argv: string[] = [];
+    try {
+      argv = splitProcCmdline(await Bun.file(`/proc/${parentPid}/cmdline`).text());
+    } catch {
+      argv = [];
+    }
+
+    const command = argv[0] ?? "";
+    const looksLikeClaude = command === "claude" || command.endsWith("/claude") || argv.some((arg) => arg.includes("@anthropic-ai/claude-code"));
+    if (looksLikeClaude) {
+      let cwd: string | undefined;
+      try {
+        cwd = await readlink(`/proc/${parentPid}/cwd`);
+      } catch {
+        cwd = undefined;
+      }
+
+      candidates.push(...executableCandidatesFromArgv(argv, cwd));
+      try {
+        candidates.push(await readlink(`/proc/${parentPid}/exe`));
+      } catch {
+        // Non-Linux or restricted /proc: rely on cmdline-derived candidates.
+      }
+      break;
+    }
+
+    currentPid = parentPid;
+  }
+
+  return [...new Set(candidates)];
 }
 
 export async function fileContainsSentinel(path: string, sentinel: string): Promise<boolean> {
