@@ -20,7 +20,7 @@
 
 | Scenario | Verdict | Reason code | Evidence |
 |---|---|---|---|
-| E2E-00 Clean install procedure | PASS | `clean-apply-pass` | Documented command `bun run apply` exited 0 against native `2.1.143`: `Context Bonsai apply complete for /home/sprite/.local/share/claude/versions/2.1.143`; `Patches applied: archived-filter, message-content-ids, context-bonsai-gauge`. |
+| E2E-00 Clean install procedure | BLOCKED | `credentials-missing-in-harness` | Functional prune/model-context-reduction proof could not run because the fresh sprite was not logged in to Claude Code. Sub-evidence: documented command `bun run apply` exited 0 against native `2.1.143`: `Context Bonsai apply complete for /home/sprite/.local/share/claude/versions/2.1.143`; `Patches applied: archived-filter, message-content-ids, context-bonsai-gauge`. |
 | E2E-01 Contiguous prune success | BLOCKED | `credentials-missing-in-harness` | Live Claude Code model smoke returned `Not logged in · Please run /login`; no transcript or tool-use scenario was run. |
 | E2E-02 Boundary ambiguity / unresolved rejection | BLOCKED | `credentials-missing-in-harness` | Blocked by missing live Claude Code login in the fresh sprite. |
 | E2E-03 Retrieve by anchor success | BLOCKED | `credentials-missing-in-harness` | Blocked by missing live Claude Code login in the fresh sprite. |
@@ -38,7 +38,7 @@
 
 ## Release-Gate Finding
 
-The approved pinned-native apply and target-artifact blockers are fixed in this rerun, but the full Story 8 release gate remains `BLOCKED` until the fresh-sprite harness has a live Claude Code login and the model-visible scenarios E2E-01..07, including Protocol A, are rerun.
+The approved pinned-native apply and target-artifact blockers are fixed in this rerun, but E2E-00 remains `BLOCKED` because its functional prune/model-context-reduction proof could not run without fresh-sprite Claude Code login. The full Story 8 release gate remains `BLOCKED` until the fresh-sprite harness has a live Claude Code login and the model-visible scenarios E2E-01..07, including Protocol A, are rerun.
 
 # Test Run: 2026-05-18T16:12:58Z
 
