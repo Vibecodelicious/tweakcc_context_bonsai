@@ -1,5 +1,6 @@
 // session.ts - Session file operations for Claude Code snapshot management
 import { createReadStream, createWriteStream } from 'fs';
+import { stat } from 'fs/promises';
 import { homedir } from 'os';
 import { createInterface } from 'readline';
 import { Glob } from 'bun';
@@ -13,6 +14,15 @@ export interface MessageRangeResult {
   messages: SessionMessage[];
   fromIndex: number;
   toIndex: number;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -61,7 +71,7 @@ export async function findCurrentSession(projectPath: string): Promise<HistoryEn
   // Print-mode sessions can create the JSONL before history.jsonl is updated.
   // Fall back to the newest session file under the project's session dir.
   const projectDir = getProjectDir(projectPath);
-  if (!(await Bun.file(projectDir).exists())) {
+  if (!(await pathExists(projectDir))) {
     return null;
   }
 
@@ -521,7 +531,7 @@ export async function getMessageRange(
  */
 export async function findSessionPath(sessionId: string): Promise<string> {
   const projectsDir = `${homedir()}/.claude/projects`;
-  if (!(await Bun.file(projectsDir).exists())) {
+  if (!(await pathExists(projectsDir))) {
     throw new Error(`Session not found: ${sessionId}`);
   }
 

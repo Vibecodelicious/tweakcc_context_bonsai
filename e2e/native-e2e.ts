@@ -202,7 +202,7 @@ async function protocolAOracle(args: Args): Promise<void> {
       return;
     }
 
-    if (!flatten(parsed).includes(args.secret as string)) return;
+    if (!isModelTranscriptRow(parsed) || !flatten(parsed).includes(args.secret as string)) return;
     const metadata = parsed.context_bonsai_v2 as { archived?: unknown } | undefined;
     occurrences.push({
       line: index + 1,
@@ -228,6 +228,10 @@ async function protocolAOracle(args: Args): Promise<void> {
 
   await writeJson(args.out, result);
   if (!result.valid) process.exitCode = 1;
+}
+
+function isModelTranscriptRow(parsed: Record<string, unknown>): boolean {
+  return parsed.type === 'user' || parsed.type === 'assistant' || parsed.type === 'summary';
 }
 
 function selectVisibilitySwitch(content: string): EvidenceSelection {
