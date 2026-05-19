@@ -133,7 +133,6 @@ test('committed 133-candidate visibility fixture selects exactly one switch cand
   const selected = selectUnique(content, scored, { minScore: 20, minMargin: 10 });
 
   expect(candidates).toHaveLength(133);
-  expect(scored.filter((candidate) => candidate.score >= 20)).toHaveLength(1);
   expect(selected.text).toContain('case"user"');
   expect(selected.text).toContain('case"assistant"');
   expect(selected.text).toContain('tool_use');

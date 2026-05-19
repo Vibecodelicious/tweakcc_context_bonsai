@@ -66,7 +66,8 @@ function n063(A063){switch(A063.type){case"system":return false;default:return t
 function n064(A064){switch(A064.type){case"system":return false;default:return true}}
 function n065(A065){switch(A065.type){case"system":return false;default:return true}}
 function n066(A066){switch(A066.type){case"system":return false;default:return true}}
-function visibilityPredicate(X){switch(X.type){case"user":case"assistant":return X.message&&X.message.content||X.tool_use;default:return false}}
+function toolUseId(H){if(H.type==="attachment")return H.attachment.toolUseID;if(H.type==="assistant"){if(H.message.content[0]?.type!=="tool_use")return null;return H.message.content[0].id}if(H.type==="user"){if(H.message.content[0]?.type!=="tool_result")return null;return H.message.content[0].tool_use_id}if(H.type==="progress")return H.toolUseID;if(H.type==="system")return H.subtype==="informational"?H.toolUseID??null:null}
+function visibilityPredicate(X,$,q,K,_,A){if(_==="transcript")return!0;switch(X.type){case"attachment":case"user":case"assistant":{if(X.type==="assistant"){let Y=X.message.content[0];if(Y?.type==="server_tool_use")return A.resolvedToolUseIDs.has(Y.id)}let z=toolUseId(X);if(!z)return!0;if($.has(z))return!1;if(q.has(z))return!1;return K.has(z)}case"system":return X.subtype!=="api_error";case"grouped_tool_use":return X.messages.every((Y)=>A.resolvedToolUseIDs.has(Y.message.content[0].id));case"collapsed_read_search":return!1}}
 function n067(A067){switch(A067.type){case"system":return false;default:return true}}
 function n068(A068){switch(A068.type){case"system":return false;default:return true}}
 function n069(A069){switch(A069.type){case"system":return false;default:return true}}

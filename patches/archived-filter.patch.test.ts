@@ -37,11 +37,11 @@ describe('archived-filter patch application', () => {
 
     expect(countOccurrences(patched, archivedFilterPatch.sentinel)).toBe(1);
     expect(patched).toContain(`${archivedFilterPatch.sentinel}{const __cbArchivedFilterCache`);
-    expect(patched).toContain('function visibilityPredicate(X){/*cb:archived-filter:v1*/{');
+    expect(patched).toContain('function visibilityPredicate(X,$,q,K,_,A){if(_==="transcript")return!0;/*cb:archived-filter:v1*/{');
   });
 
   test('disambiguates the native 2.1.143 transcript visibility switch by surrounding context', async () => {
-    const content = `${await fixtureBundle('visibility-switch-133.fixture.js')}
+    const content = `${await fixtureBundle('visibility-switch.fixture.js')}
       function noisyTrace(w){switch(w.type){case"user":case"assistant":{if("message"in w){let D=w.message.content;if(Array.isArray(D))for(let j of D){if(j.type==="tool_use")return D}}}}
       function toolUseId(H){switch(H.type){case"attachment":return H.attachment.toolUseID;case"assistant":if(H.message.content[0]?.type!=="tool_use")return null;return H.message.content[0].id;case"user":if(H.message.content[0]?.type!=="tool_result")return null;return H.message.content[0].tool_use_id;case"progress":return H.toolUseID;case"system":return H.subtype==="informational"?H.toolUseID??null:null}}
       function nativeVisibility(H,$,q,K,_,A){if(_==="transcript")return!0;switch(H.type){case"attachment":case"user":case"assistant":{if(H.type==="assistant"){let Y=H.message.content[0];if(Y?.type==="server_tool_use")return A.resolvedToolUseIDs.has(Y.id)}let z=toolUseId(H);if(!z)return!0;if($.has(z))return!1;if(q.has(z))return!1;return K.has(z)}case"system":return H.subtype!=="api_error";case"grouped_tool_use":return H.messages.every((Y)=>A.resolvedToolUseIDs.has(Y.message.content[0].id));case"collapsed_read_search":return!1}}
@@ -128,7 +128,8 @@ function S3(){return Z9.sessionId}
 function J0(a,b){return String(a).replace(/\\/+$/,'')+'/'+b}
 if(A1().existsSync(J0(C2(),"history.jsonl"))){A1().readFileSync(J0(C2(),"history.jsonl"))}
 A1().writeFileSync(J0(C2(),"todos"),"[]")
-function visibilityPredicate(X){switch(X.type){case"user":case"assistant":return X.message&&X.message.content||X.tool_use;default:return false}}
+function toolUseId(X){if(X.type==="assistant")return X.message.content[0]?.id;if(X.type==="user")return X.message.content[0]?.tool_use_id;return X.toolUseID}
+function visibilityPredicate(X,$,q,K,_,A){if(_==="transcript")return!0;switch(X.type){case"attachment":case"user":case"assistant":{let z=toolUseId(X);if(!z)return X.message&&X.message.content||X.tool_use;return A.resolvedToolUseIDs.has(z)}case"system":return X.subtype!=="api_error";case"grouped_tool_use":return A.resolvedToolUseIDs.has(X.message.content[0].id);case"collapsed_read_search":return false}}
 `;
 }
 

@@ -1,19 +1,9 @@
-import {
-  findCandidates,
-  findRuntimeHelpers,
-  scoreCandidates,
-  selectUnique,
-  verifySentinel,
-  type Candidate,
-} from './discovery';
+import { findRuntimeHelpers, verifySentinel } from './discovery';
+import { selectVisibilitySwitchAnchor } from './anchors';
 import { BonsaiPatchError, type BonsaiPatch } from './types';
 
 const patchName = 'archived-filter';
 const sentinel = '/*cb:archived-filter:v1*/';
-const identifier = String.raw`[$A-Z_a-z][$\w]*`;
-const visibilitySwitchPatterns = [
-  new RegExp(String.raw`switch\((${identifier})\.type\)\{[^}]+\}`, 'g'),
-];
 
 export const archivedFilterPatch: BonsaiPatch = {
   name: patchName,
@@ -21,11 +11,8 @@ export const archivedFilterPatch: BonsaiPatch = {
   apply(content) {
     try {
       const helpers = findRuntimeHelpers(content);
-      const candidates = findCandidates(content, visibilitySwitchPatterns);
-      const scored = scoreCandidates(content, candidates, [visibilitySwitchScorer]);
-      const selected = selectUnique(content, scored, { minScore: 20, minMargin: 10 });
-      const messageVar = extractMessageVariable(selected);
-      const injected = buildInjectedFilter(messageVar, helpers);
+      const selected = selectVisibilitySwitchAnchor(content);
+      const injected = buildInjectedFilter(selected.messageVar, helpers);
       const patched = `${content.slice(0, selected.index)}${injected}${content.slice(selected.index)}`;
 
       verifySentinel(patched, sentinel);
@@ -39,32 +26,6 @@ export const archivedFilterPatch: BonsaiPatch = {
 };
 
 export default archivedFilterPatch;
-
-function visibilitySwitchScorer(content: string, candidate: Candidate): number {
-  let score = 0;
-  if (candidate.text.includes('case"user"')) score += 15;
-  if (candidate.text.includes('case"assistant"')) score += 15;
-  if (candidate.text.includes('message')) score += 5;
-  if (candidate.text.includes('content')) score += 5;
-  if (candidate.text.includes('tool_use')) score += 3;
-  const before = content.slice(Math.max(0, candidate.index - 120), candidate.index);
-  const after = content.slice(candidate.index, candidate.index + 1200);
-  if (/if\([^)]*===["']transcript["']\)return!0;?$/.test(before)) score += 25;
-  if (/resolvedToolUseIDs/.test(after)) score += 10;
-  if (/case["']grouped_tool_use["']/.test(after)) score += 10;
-  if (/case["']collapsed_read_search["']/.test(after)) score += 10;
-  if (/case["']system["'][^]*api_error/.test(after)) score += 5;
-  return score;
-}
-
-function extractMessageVariable(candidate: Candidate): string {
-  const match = new RegExp(String.raw`switch\((${identifier})\.type\)`).exec(candidate.text);
-  const variable = match?.[1];
-  if (!variable) {
-    throw new BonsaiPatchError(patchName, 'selected visibility switch did not expose a message variable');
-  }
-  return variable;
-}
 
 function buildInjectedFilter(
   messageVar: string,

@@ -1,44 +1,13 @@
+import { verifySentinel, type Candidate } from './discovery';
 import {
-  findCandidates,
-  scoreCandidates,
-  selectUnique,
-  verifySentinel,
-  type Candidate,
-} from './discovery';
+  selectAttachmentPipelineAnchor,
+  selectReminderRenderAnchor,
+  selectTokenUsageHelperAnchor,
+} from './anchors';
 import { BonsaiPatchError, type BonsaiPatch } from './types';
 
 const patchName = 'context-bonsai-gauge';
 const sentinel = '/*cb:context-bonsai-gauge:v1*/';
-const identifier = String.raw`[$A-Z_a-z][$\w]*`;
-
-const tokenUsagePatterns = [
-  new RegExp(
-    String.raw`function\s+(${identifier})\s*\([^)]*\)\s*\{(?=[\s\S]{0,900}\b(?:contextWindow|contextLimit|usableBudget|modelLimit)\b)(?=[\s\S]{0,900}\b(?:usedTokens|inputTokens|totalTokens)\b)[\s\S]{0,900}?\}`,
-    'g'
-  ),
-  new RegExp(
-    String.raw`(?:const|let|var)\s+(${identifier})\s*=\s*\([^)]*\)\s*=>\s*\{(?=[\s\S]{0,900}\b(?:contextWindow|contextLimit|usableBudget|modelLimit)\b)(?=[\s\S]{0,900}\b(?:usedTokens|inputTokens|totalTokens)\b)[\s\S]{0,900}?\}`,
-    'g'
-  ),
-];
-
-const attachmentPipelinePatterns = [
-  new RegExp(
-    String.raw`function\s+${identifier}\s*\(\s*(${identifier})\s*,\s*(${identifier})\s*\)\s*\{(?=[\s\S]{0,800}\.push\s*\()(?=[\s\S]{0,800}(?:todo|reminder|attachment))[\s\S]{0,800}?\}`,
-    'g'
-  ),
-  new RegExp(
-    String.raw`(?:const|let|var)\s+${identifier}\s*=\s*\(\s*(${identifier})\s*,\s*(${identifier})\s*\)\s*=>\s*\{(?=[\s\S]{0,800}\.push\s*\()(?=[\s\S]{0,800}(?:todo|reminder|attachment))[\s\S]{0,800}?\}`,
-    'g'
-  ),
-];
-
-const reminderRenderPatterns = [
-  new RegExp(
-    String.raw`switch\(\s*(${identifier})\.type\s*\)\s*\{(?=[\s\S]{0,1800}case["'](?:todo[_-]?reminder|todo)["'])[\s\S]{0,1800}?case["'](?:todo[_-]?reminder|todo)["']`,
-    'g'
-  ),
-];
 
 export const contextBonsaiGaugePatch: BonsaiPatch = {
   name: patchName,
@@ -71,82 +40,15 @@ export const contextBonsaiGaugePatch: BonsaiPatch = {
 export default contextBonsaiGaugePatch;
 
 function selectTokenUsageHelper(content: string): Candidate & { name: string } {
-  const candidates = findCandidates(content, tokenUsagePatterns);
-  const scored = scoreCandidates(content, candidates, [tokenUsageScorer]);
-  const selected = selectUnique(content, scored, { minScore: 15, minMargin: 10 });
-  const name = extractFunctionName(selected);
-  return { ...selected, name };
+  return selectTokenUsageHelperAnchor(content);
 }
 
 function selectAttachmentPipeline(content: string): Candidate & { attachmentsVar: string; messagesVar: string } {
-  const candidates = findCandidates(content, attachmentPipelinePatterns);
-  const scored = scoreCandidates(content, candidates, [attachmentPipelineScorer]);
-  const selected = selectUnique(content, scored, { minScore: 15, minMargin: 10 });
-  const vars = extractTwoParameters(selected, 'selected attachment pipeline did not expose attachment/message variables');
-  return { ...selected, attachmentsVar: vars.first, messagesVar: vars.second };
+  return selectAttachmentPipelineAnchor(content);
 }
 
 function selectReminderRenderCase(content: string): Candidate & { attachmentVar: string } {
-  const candidates = findCandidates(content, reminderRenderPatterns);
-  const scored = scoreCandidates(content, candidates, [reminderRenderScorer]);
-  const selected = selectUnique(content, scored, { minScore: 15, minMargin: 10 });
-  const attachmentVar = new RegExp(String.raw`switch\(\s*(${identifier})\.type\s*\)`).exec(selected.text)?.[1];
-  if (!attachmentVar) {
-    throw new BonsaiPatchError(patchName, 'selected reminder render case did not expose attachment variable');
-  }
-  return { ...selected, attachmentVar };
-}
-
-function tokenUsageScorer(_content: string, candidate: Candidate): number {
-  let score = 0;
-  if (/\b(?:contextWindow|contextLimit|usableBudget|modelLimit)\b/.test(candidate.text)) score += 20;
-  if (/\b(?:usedTokens|inputTokens|totalTokens)\b/.test(candidate.text)) score += 15;
-  if (/\b(?:cacheReadInputTokens|cacheCreationInputTokens|outputTokens)\b/.test(candidate.text)) score += 10;
-  if (/\breturn\b/.test(candidate.text)) score += 5;
-  return score;
-}
-
-function attachmentPipelineScorer(_content: string, candidate: Candidate): number {
-  let score = 0;
-  if (/\.push\s*\(/.test(candidate.text)) score += 15;
-  if (/\b(?:todo|reminder)\b/i.test(candidate.text)) score += 15;
-  if (/\battachment/i.test(candidate.text)) score += 10;
-  if (/\b(?:hook_permission_decision|mcpCallCount|bashCount|latestDisplayHint)\b/.test(candidate.text)) score += 20;
-  if (/typeof\s+\w+!==["']object["']/.test(candidate.text)) score -= 10;
-  if (/\breturn\b/.test(candidate.text)) score += 5;
-  return score;
-}
-
-function reminderRenderScorer(_content: string, candidate: Candidate): number {
-  let score = 0;
-  if (/case["'](?:todo[_-]?reminder|todo)["']/.test(candidate.text)) score += 20;
-  if (/\btext\b|\bcontent\b/.test(candidate.text)) score += 10;
-  if (/\breturn\b/.test(candidate.text)) score += 5;
-  return score;
-}
-
-function extractFunctionName(candidate: Candidate): string {
-  for (const pattern of [
-    new RegExp(String.raw`function\s+(${identifier})\s*\(`),
-    new RegExp(String.raw`(?:const|let|var)\s+(${identifier})\s*=`),
-  ]) {
-    const name = pattern.exec(candidate.text)?.[1];
-    if (name) return name;
-  }
-
-  throw new BonsaiPatchError(patchName, 'selected token usage helper did not expose a function name');
-}
-
-function extractTwoParameters(candidate: Candidate, message: string): { first: string; second: string } {
-  for (const pattern of [
-    new RegExp(String.raw`function\s+${identifier}\s*\(\s*(${identifier})\s*,\s*(${identifier})\s*\)`),
-    new RegExp(String.raw`(?:const|let|var)\s+${identifier}\s*=\s*\(\s*(${identifier})\s*,\s*(${identifier})\s*\)\s*=>`),
-  ]) {
-    const match = pattern.exec(candidate.text);
-    if (match?.[1] && match[2]) return { first: match[1], second: match[2] };
-  }
-
-  throw new BonsaiPatchError(patchName, message);
+  return selectReminderRenderAnchor(content);
 }
 
 function spliceAttachmentRegistration(

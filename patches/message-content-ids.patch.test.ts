@@ -93,7 +93,8 @@ function buildPatchedConverter(configDir: string): (message: { type: string; uui
 
 function composedRuntimeBundle(): string {
   return `${runtimeHelpersOnly()}
-function visibilityPredicate(X){switch(X.type){case"user":case"assistant":return X.message&&X.message.content||X.tool_use;default:return false}}
+function toolUseId(X){if(X.type==="assistant")return X.message.content[0]?.id;if(X.type==="user")return X.message.content[0]?.tool_use_id;return X.toolUseID}
+function visibilityPredicate(X,$,q,K,_,A){if(_==="transcript")return!0;switch(X.type){case"attachment":case"user":case"assistant":{let z=toolUseId(X);if(!z)return X.message&&X.message.content||X.tool_use;return A.resolvedToolUseIDs.has(z)}case"system":return X.subtype!=="api_error";case"grouped_tool_use":return A.resolvedToolUseIDs.has(X.message.content[0].id);case"collapsed_read_search":return false}}
 function convertMessage(M){return{role:M.type,content:M.message.content,id:M.uuid,metadata:{uuid:M.uuid}}}`;
 }
 
