@@ -154,10 +154,20 @@ function findSessionIdCandidates(content: string): Map<string, number> {
     content,
     new RegExp(String.raw`function\s+(${IDENTIFIER})\s*\(\s*\)\s*\{\s*return\s+${IDENTIFIER}\s*\.\s*sessionId\s*;?\s*\}`, 'g')
   );
+  const optionalSessionCounts = countMatches(
+    content,
+    new RegExp(
+      String.raw`function\s+(${IDENTIFIER})\s*\(\s*\)\s*\{\s*return\s+${IDENTIFIER}\s*\(\s*\)\s*\?\.\s*sessionId\s*\?\?\s*${IDENTIFIER}\s*\.\s*sessionId\s*;?\s*\}`,
+      'g'
+    )
+  );
   const arrowCounts = countMatches(
     content,
     new RegExp(String.raw`(?:const|let|var)\s+(${IDENTIFIER})\s*=\s*\(\s*\)\s*=>\s*${IDENTIFIER}\s*\.\s*sessionId\b`, 'g')
   );
+  for (const [identifier, count] of optionalSessionCounts) {
+    counts.set(identifier, (counts.get(identifier) ?? 0) + count);
+  }
   for (const [identifier, count] of arrowCounts) {
     counts.set(identifier, (counts.get(identifier) ?? 0) + count);
   }

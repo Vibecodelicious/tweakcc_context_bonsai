@@ -54,6 +54,7 @@ describe('message-content-ids patch application', () => {
     expect(countOccurrences(fullyPatched, archivedFilterPatch.sentinel)).toBe(1);
     expect(countOccurrences(fullyPatched, messageContentIdsPatch.sentinel)).toBe(1);
   });
+
 });
 
 describe('injected message content tags', () => {

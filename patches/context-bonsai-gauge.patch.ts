@@ -35,7 +35,7 @@ const attachmentPipelinePatterns = [
 
 const reminderRenderPatterns = [
   new RegExp(
-    String.raw`switch\(\s*(${identifier})\.type\s*\)\s*\{(?=[\s\S]{0,500}case["'](?:todo[_-]?reminder|todo)["'])[\s\S]{0,500}?case["'](?:todo[_-]?reminder|todo)["']`,
+    String.raw`switch\(\s*(${identifier})\.type\s*\)\s*\{(?=[\s\S]{0,1800}case["'](?:todo[_-]?reminder|todo)["'])[\s\S]{0,1800}?case["'](?:todo[_-]?reminder|todo)["']`,
     'g'
   ),
 ];
@@ -111,6 +111,8 @@ function attachmentPipelineScorer(_content: string, candidate: Candidate): numbe
   if (/\.push\s*\(/.test(candidate.text)) score += 15;
   if (/\b(?:todo|reminder)\b/i.test(candidate.text)) score += 15;
   if (/\battachment/i.test(candidate.text)) score += 10;
+  if (/\b(?:hook_permission_decision|mcpCallCount|bashCount|latestDisplayHint)\b/.test(candidate.text)) score += 20;
+  if (/typeof\s+\w+!==["']object["']/.test(candidate.text)) score -= 10;
   if (/\breturn\b/.test(candidate.text)) score += 5;
   return score;
 }

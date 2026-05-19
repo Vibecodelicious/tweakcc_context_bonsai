@@ -164,6 +164,10 @@ function selectMessageContentConverter(content: string): EvidenceSelection {
     content,
     [
       new RegExp(
+        String.raw`function\s+${identifier}\s*\(\s*(${identifier})[^)]*\)\s*\{[\s\S]{0,900}?return\s*\{\s*role\s*:\s*["'](?:user|assistant)["']\s*,\s*content\s*:`,
+        'g'
+      ),
+      new RegExp(
         String.raw`function\s+${identifier}\s*\(\s*(${identifier})\s*\)\s*\{(?=[\s\S]{0,800}\buuid\b)(?=[\s\S]{0,800}\bcontent\s*:)[\s\S]{0,800}?return\s*\{[\s\S]{0,400}?\bcontent\s*:\s*[^,}]+`,
         'g'
       ),
@@ -222,7 +226,7 @@ function selectReminderRenderCase(content: string): EvidenceSelection {
     content,
     [
       new RegExp(
-        String.raw`switch\(\s*(${identifier})\.type\s*\)\s*\{(?=[\s\S]{0,500}case["'](?:todo[_-]?reminder|todo)["'])[\s\S]{0,500}?case["'](?:todo[_-]?reminder|todo)["']`,
+        String.raw`switch\(\s*(${identifier})\.type\s*\)\s*\{(?=[\s\S]{0,1800}case["'](?:todo[_-]?reminder|todo)["'])[\s\S]{0,1800}?case["'](?:todo[_-]?reminder|todo)["']`,
         'g'
       ),
     ],
@@ -251,13 +255,20 @@ function serializeCandidate(candidate: Candidate): EvidenceSelection['selected']
   };
 }
 
-function visibilitySwitchScorer(_content: string, candidate: Candidate): number {
+function visibilitySwitchScorer(content: string, candidate: Candidate): number {
   let score = 0;
   if (candidate.text.includes('case"user"')) score += 15;
   if (candidate.text.includes('case"assistant"')) score += 15;
   if (candidate.text.includes('message')) score += 5;
   if (candidate.text.includes('content')) score += 5;
   if (candidate.text.includes('tool_use')) score += 3;
+  const before = content.slice(Math.max(0, candidate.index - 120), candidate.index);
+  const after = content.slice(candidate.index, candidate.index + 1200);
+  if (/if\([^)]*===["']transcript["']\)return!0;?$/.test(before)) score += 25;
+  if (/resolvedToolUseIDs/.test(after)) score += 10;
+  if (/case["']grouped_tool_use["']/.test(after)) score += 10;
+  if (/case["']collapsed_read_search["']/.test(after)) score += 10;
+  if (/case["']system["'][^]*api_error/.test(after)) score += 5;
   return score;
 }
 
@@ -268,6 +279,13 @@ function messageConverterScorer(_content: string, candidate: Candidate): number 
   if (/\brole\s*:/.test(candidate.text)) score += 10;
   if (/\bmessage\b/.test(candidate.text)) score += 5;
   if (/\btype\b/.test(candidate.text)) score += 5;
+  if (/\b\w+\.message\.content\b/.test(candidate.text)) score += 15;
+  if (/\brole\s*:\s*["']user["']/.test(candidate.text)) score += 20;
+  if (/\brole\s*:\s*["']assistant["']/.test(candidate.text)) score += 5;
+  if (/\brole\s*:\s*["']system["']/.test(candidate.text)) score -= 20;
+  if (/\bmetadata\s*:\s*\{\s*uuid\b/.test(candidate.text)) score += 10;
+  if (/typeof\s+\w+\.message\.content\s*===\s*["']string["']/.test(candidate.text)) score += 10;
+  if (/\.map\s*\(/.test(candidate.text)) score -= 40;
   return score;
 }
 
@@ -285,6 +303,8 @@ function attachmentPipelineScorer(_content: string, candidate: Candidate): numbe
   if (/\.push\s*\(/.test(candidate.text)) score += 15;
   if (/\b(?:todo|reminder)\b/i.test(candidate.text)) score += 15;
   if (/\battachment/i.test(candidate.text)) score += 10;
+  if (/\b(?:hook_permission_decision|mcpCallCount|bashCount|latestDisplayHint)\b/.test(candidate.text)) score += 20;
+  if (/typeof\s+\w+!==["']object["']/.test(candidate.text)) score -= 10;
   if (/\breturn\b/.test(candidate.text)) score += 5;
   return score;
 }

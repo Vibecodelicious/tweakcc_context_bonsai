@@ -40,13 +40,20 @@ export const archivedFilterPatch: BonsaiPatch = {
 
 export default archivedFilterPatch;
 
-function visibilitySwitchScorer(_content: string, candidate: Candidate): number {
+function visibilitySwitchScorer(content: string, candidate: Candidate): number {
   let score = 0;
   if (candidate.text.includes('case"user"')) score += 15;
   if (candidate.text.includes('case"assistant"')) score += 15;
   if (candidate.text.includes('message')) score += 5;
   if (candidate.text.includes('content')) score += 5;
   if (candidate.text.includes('tool_use')) score += 3;
+  const before = content.slice(Math.max(0, candidate.index - 120), candidate.index);
+  const after = content.slice(candidate.index, candidate.index + 1200);
+  if (/if\([^)]*===["']transcript["']\)return!0;?$/.test(before)) score += 25;
+  if (/resolvedToolUseIDs/.test(after)) score += 10;
+  if (/case["']grouped_tool_use["']/.test(after)) score += 10;
+  if (/case["']collapsed_read_search["']/.test(after)) score += 10;
+  if (/case["']system["'][^]*api_error/.test(after)) score += 5;
   return score;
 }
 

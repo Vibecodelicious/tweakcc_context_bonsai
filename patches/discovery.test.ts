@@ -78,6 +78,19 @@ describe('runtime helper discovery', () => {
     });
   });
 
+  test('resolves the optional current-session helper shape from native 2.1.143', () => {
+    const content = `
+      function A1(){return require("fs")}
+      function C2(){return process.env.CLAUDE_CONFIG_DIR}
+      function V1(){return currentSession}
+      function S4(){return V1()?.sessionId??F$.sessionId}
+      if(A1().existsSync(J0(C2(),"history.jsonl"))){A1().readFileSync(J0(C2(),"history.jsonl"),"utf8")}
+      A1().writeFileSync(J0(C2(),"todos"),"[]")
+    `;
+
+    expect(findRuntimeHelpers(content).sessionIdFunc).toBe('S4');
+  });
+
   test('throws RuntimeHelpersError if any helper cannot be resolved', () => {
     expect(() => findRuntimeHelpers('function A(){return require("fs")}')).toThrow(RuntimeHelpersError);
   });
@@ -126,12 +139,19 @@ test('committed 133-candidate visibility fixture selects exactly one switch cand
   expect(selected.text).toContain('tool_use');
 });
 
-function visibilitySwitchScorer(_content: string, candidate: Candidate): number {
+function visibilitySwitchScorer(content: string, candidate: Candidate): number {
   let score = 0;
   if (candidate.text.includes('case"user"')) score += 15;
   if (candidate.text.includes('case"assistant"')) score += 15;
   if (candidate.text.includes('message')) score += 5;
   if (candidate.text.includes('content')) score += 5;
   if (candidate.text.includes('tool_use')) score += 3;
+  const before = content.slice(Math.max(0, candidate.index - 120), candidate.index);
+  const after = content.slice(candidate.index, candidate.index + 1200);
+  if (/if\([^)]*===["']transcript["']\)return!0;?$/.test(before)) score += 25;
+  if (/resolvedToolUseIDs/.test(after)) score += 10;
+  if (/case["']grouped_tool_use["']/.test(after)) score += 10;
+  if (/case["']collapsed_read_search["']/.test(after)) score += 10;
+  if (/case["']system["'][^]*api_error/.test(after)) score += 5;
   return score;
 }
