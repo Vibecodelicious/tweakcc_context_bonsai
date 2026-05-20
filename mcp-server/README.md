@@ -1,6 +1,6 @@
 # Context Bonsai MCP Server
 
-> **Note:** Throughout this document, `<INSTALL_DIR>` should be replaced with the actual path where you cloned or installed this project (e.g., `/home/user/projects/the_observer`).
+> **Note:** Throughout this document, `<INSTALL_DIR>` should be replaced with the actual path where you cloned or installed this project, such as `/home/user/projects/tweakcc_context_bonsai`.
 
 An MCP (Model Context Protocol) server that enables Claude Code to manage its own conversation context through selective archival and restoration.
 
@@ -26,8 +26,8 @@ Before using this MCP server, ensure:
 
    Apply patches with:
    ```bash
-   cd <INSTALL_DIR>/tweakcc
-   npx tweakcc --apply
+   cd <INSTALL_DIR>
+   bun run apply
    ```
 
 ## Installation
@@ -39,7 +39,7 @@ bun install
 
 ## Registration
 
-Add the server to your Claude Code settings at `~/.claude/settings.json`:
+Add the server to your Claude Code settings at `~/.claude.json`:
 
 ```json
 {
@@ -90,7 +90,7 @@ Use context-bonsai-retrieve with:
 The MCP server discovers the current Claude Code session by:
 
 1. Walking the parent-process chain from the MCP server process
-2. Reading `/proc/<pid>/cmdline` to look for a resumed session id
+2. Reading `/proc/<pid>/cmdline` to identify the Claude Code ancestor process and session context
 3. Falling back to cwd-based session lookup when needed
 
 ### Architecture
@@ -116,7 +116,7 @@ This error occurs when the MCP server cannot determine which Claude Code session
 
 **Causes:**
 - The parent process is not Claude Code
-- The Claude Code process doesn't have `--resume` in its cmdline (fresh session)
+- The MCP server cannot identify the Claude Code ancestor process
 - No matching entry found in `~/.claude/history.jsonl` for the current project
 
 **Solutions:**
@@ -124,21 +124,21 @@ This error occurs when the MCP server cannot determine which Claude Code session
 2. Check that `~/.claude/history.jsonl` exists and contains entries for your project
 3. If the session was just created, try sending a message first to establish history
 
-### "ccsnap not found" or compaction errors
+### Missing dependencies or import errors
 
-The MCP server expects ccsnap to be available at the relative path `../src/index.ts` from the mcp-server directory.
+The MCP server imports shared library code from the repo root and also has its own `mcp-server` dependencies.
 
 **Solutions:**
-1. Ensure you're running from the correct project structure
-2. Check that `<INSTALL_DIR>/src/index.ts` exists
-3. Run `bun install` in the root project directory if dependencies are missing
+1. Run `bun install` in `<INSTALL_DIR>`
+2. Run `bun install` in `<INSTALL_DIR>/mcp-server`
+3. Check that the MCP registration points at `<INSTALL_DIR>/mcp-server/index.ts`
 
 ### Archived messages still visible
 
 This requires the `archivedFilter` tweakcc patch to be applied to Claude Code.
 
 **Solutions:**
-1. Apply tweakcc patches: `cd tweakcc && npx tweakcc --apply`
+1. Apply tweakcc patches from the repo root: `cd <INSTALL_DIR> && bun run apply`
 2. Restart Claude Code after applying patches
 3. Verify `archivedFilter` applied successfully
 

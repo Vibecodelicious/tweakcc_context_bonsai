@@ -25,6 +25,8 @@ bun test
 bun run typecheck
 ```
 
+Run commands from this side repo. Live Claude Code validation requires Claude Code installed, signed in, and configured to launch this repo's MCP server.
+
 ## Notes
 
 Linux-like `/proc` support is required for process-based session discovery. Some commands fall back to Claude Code history files, but process discovery is still part of the current implementation.
