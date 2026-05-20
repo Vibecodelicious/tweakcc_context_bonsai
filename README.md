@@ -1,6 +1,6 @@
 # tweakcc Context Bonsai
 
-Context Bonsai support for Claude Code through a local MCP server and optional tweakcc runtime patches.
+Context Bonsai support for Claude Code through a local MCP server and optional runtime patches applied via [tweakcc](https://github.com/Piebald-AI/tweakcc), a third-party tool for customizing Claude Code's bundled runtime files.
 
 Claude Code is closed-source, so this repo provides the side implementation: a `ccsnap` CLI plus a `context-bonsai` MCP server that can operate on Claude Code session files.
 
@@ -105,7 +105,6 @@ Because Claude Code is not open-source, there is no paired harness repo in this 
 ## Requirements And Limitations
 
 - Claude Code local session files must be available under `~/.claude`.
-- Prune uses unique plain-text boundaries; UUID selectors are rejected by the MCP tool.
 - Retrieval restores archived JSONL rows in their original transcript positions, but immediate same-turn visibility depends on Claude Code's in-memory transcript handling.
 
 ## Development
