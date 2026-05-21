@@ -38,9 +38,9 @@ Register the MCP server in Claude Code by adding it to `~/.claude.json`:
 
 Restart Claude Code after changing MCP settings.
 
-### Optional: apply tweakcc runtime patches
+### Apply tweakcc runtime patches
 
-The MCP server can mutate Claude Code session files on its own. Full in-harness behavior also needs the tweakcc runtime patch so archived messages are filtered from provider-bound context and context-pressure guidance is surfaced inside Claude Code.
+The MCP server handles prune and retrieve requests, but pruning requires the runtime patch. Without it, the MCP server fails closed instead of writing archive state, because Claude Code would otherwise keep sending archived messages to the LLM. The patch filters archived messages from the transcript sent to the LLM and surfaces context-pressure guidance inside Claude Code.
 
 Apply the patch from this repo:
 
