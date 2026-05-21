@@ -2,13 +2,11 @@
   "name": "tweakcc-context-bonsai",
   "version": "0.1.1",
   "type": "module",
-  "description": "Context Bonsai for Claude Code: ccsnap CLI + the context-bonsai MCP server (tweakcc).",
+  "description": "Context Bonsai for Claude Code: context-bonsai MCP server plus tweakcc patch tooling.",
   "bin": {
-    "ccsnap": "./src/index.ts",
     "context-bonsai": "./mcp-server/index.ts"
   },
   "scripts": {
-    "start": "bun run src/index.ts",
     "apply": "bun run apply/apply-bonsai.ts",
     "apply:restore": "bun run apply/apply-bonsai.ts --restore",
     "test": "bun test",

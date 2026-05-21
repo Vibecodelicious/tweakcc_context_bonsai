@@ -334,7 +334,7 @@ export async function markMessagesArchived(
 }
 
 /**
- * Extended SummaryMessage type that includes uuid for ccsnap compact operation.
+ * Extended SummaryMessage type that includes the archive placeholder UUID.
  */
 export interface CompactSummaryMessage extends SummaryMessage {
   uuid: string;

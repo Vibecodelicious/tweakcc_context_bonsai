@@ -10,12 +10,12 @@ Existing historical docs in this repo are not canonical. Use the current TypeScr
 
 ## Implementation Notes
 
-- `src/index.ts` is the `ccsnap` CLI entrypoint.
 - `mcp-server/index.ts` is the MCP stdio server entrypoint.
 - `src/lib/compact.ts` contains archive/retrieve mutation logic for Claude Code JSONL sessions.
-- `src/lib/paths.ts`, `src/lib/session.ts`, and `src/lib/process.ts` discover Claude Code session files.
+- `src/lib/paths.ts` and `src/lib/session.ts` resolve Claude Code history and session files.
+- `mcp-server/index.ts` performs MCP-local process discovery for active-session resolution.
 
-The MCP server imports shared library code directly. It does not shell out to the `ccsnap` CLI for prune/retrieve operations.
+The MCP server imports shared library code directly. It does not shell out for prune/retrieve operations.
 
 ## Commands
 

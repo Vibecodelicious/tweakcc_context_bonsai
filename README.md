@@ -1,8 +1,8 @@
 # tweakcc Context Bonsai
 
-Context Bonsai support for Claude Code through a local MCP server and optional runtime patches applied via [tweakcc](https://github.com/Piebald-AI/tweakcc), a third-party tool for customizing Claude Code's bundled runtime files.
+Context Bonsai support for Claude Code through a local MCP server and runtime patches applied via [tweakcc](https://github.com/Piebald-AI/tweakcc), a third-party tool for customizing Claude Code's bundled runtime files.
 
-Claude Code is closed-source, so this repo provides the side implementation: a `ccsnap` CLI plus a `context-bonsai` MCP server that can operate on Claude Code session files.
+Claude Code is closed-source, so this repo provides the side implementation: the `context-bonsai` MCP server, tweakcc patch apply/restore tooling, and shared TypeScript libraries for Claude Code session files.
 
 For the shared explanation of Context Bonsai, see the main project README: https://github.com/Vibecodelicious/context-bonsai-agents
 
@@ -75,18 +75,12 @@ The MCP server exposes:
 
 It discovers the active Claude Code session, resolves prune boundaries by unique text patterns, updates the session JSONL, records archive metadata, and appends a summary placeholder. Retrieval restores archived messages from the anchor metadata.
 
-The repo also provides the `ccsnap` CLI for session snapshot and archive operations:
-
-```sh
-bun run src/index.ts --help
-```
-
 ## Security Disclosure
 
 - **What the integration reads.** Claude Code session JSONL files under `~/.claude/projects/...` and Claude Code process information needed to discover the active session.
 - **Where archive state persists on disk.** Archive flags and placeholders are written to the active Claude Code session JSONL. Marker files named `~/.claude/archived-<session-id>.json` track archived message ids for the runtime patch.
 - **What is transmitted to the LLM provider.** Placeholder summaries and index terms remain in the active transcript and can be sent to the model. Archived original messages are hidden from active context when the runtime patch is applied, and become visible again after retrieval.
-- **Network egress.** The MCP server and CLI do not initiate model-provider network calls separately from Claude Code.
+- **Network egress.** The MCP server does not initiate model-provider network calls separately from Claude Code.
 
 ## Uninstall
 
@@ -96,7 +90,7 @@ bun run src/index.ts --help
 
 ## How This Is Implemented For Claude Code
 
-The MCP server and CLI share TypeScript library code. The MCP server imports the library directly rather than shelling out to the CLI.
+The MCP server imports shared TypeScript library code directly. Prune and retrieve do not shell out to another local CLI.
 
 Current persistence uses Claude Code's local session layout under `~/.claude`, including session JSONL files in `~/.claude/projects/...` and archive marker files named `~/.claude/archived-<session-id>.json`.
 

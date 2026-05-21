@@ -6,8 +6,6 @@ import { tmpdir } from 'os';
 import {
   findCurrentSession,
   readSessionMessages,
-  transformSessionId,
-  copySessionWithNewId,
   validateJsonlIntegrity,
   findMessageByUuid,
   getMessageRange,
@@ -25,70 +23,6 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(testDir, { recursive: true, force: true });
-});
-
-describe('transformSessionId', () => {
-  test('replaces sessionId when it matches', () => {
-    const line = JSON.stringify({
-      sessionId: 'old-uuid',
-      uuid: 'msg-uuid',
-      parentUuid: 'parent-uuid',
-      type: 'user',
-    });
-    const result = transformSessionId(line, 'old-uuid', 'new-uuid');
-    const parsed = JSON.parse(result);
-
-    expect(parsed.sessionId).toBe('new-uuid');
-    expect(parsed.uuid).toBe('msg-uuid'); // Preserved
-    expect(parsed.parentUuid).toBe('parent-uuid'); // Preserved
-  });
-
-  test('preserves sessionId when it does not match', () => {
-    const line = JSON.stringify({ sessionId: 'different-uuid', data: 'test' });
-    const result = transformSessionId(line, 'old-uuid', 'new-uuid');
-    const parsed = JSON.parse(result);
-
-    expect(parsed.sessionId).toBe('different-uuid');
-  });
-
-  test('handles objects without sessionId', () => {
-    const line = JSON.stringify({ type: 'summary', summary: 'test' });
-    const result = transformSessionId(line, 'old-uuid', 'new-uuid');
-    const parsed = JSON.parse(result);
-
-    expect(parsed.sessionId).toBeUndefined();
-    expect(parsed.summary).toBe('test');
-  });
-
-  test('returns empty string for empty input', () => {
-    expect(transformSessionId('', 'old', 'new')).toBe('');
-    expect(transformSessionId('   ', 'old', 'new')).toBe('');
-  });
-
-  test('throws on invalid JSON', () => {
-    expect(() => transformSessionId('{invalid json}', 'old', 'new')).toThrow();
-  });
-
-  test('preserves all other UUID fields', () => {
-    const original = {
-      sessionId: 'session-to-replace',
-      uuid: 'message-uuid-keep',
-      parentUuid: 'parent-uuid-keep',
-      messageId: 'message-id-keep',
-      nested: {
-        uuid: 'nested-uuid-keep',
-      },
-    };
-    const line = JSON.stringify(original);
-    const result = transformSessionId(line, 'session-to-replace', 'new-session');
-    const parsed = JSON.parse(result);
-
-    expect(parsed.sessionId).toBe('new-session');
-    expect(parsed.uuid).toBe('message-uuid-keep');
-    expect(parsed.parentUuid).toBe('parent-uuid-keep');
-    expect(parsed.messageId).toBe('message-id-keep');
-    expect(parsed.nested.uuid).toBe('nested-uuid-keep');
-  });
 });
 
 describe('validateJsonlIntegrity', () => {
@@ -218,78 +152,6 @@ describe('readSessionMessages', () => {
   test('throws for non-existent file', async () => {
     const gen = readSessionMessages('/nonexistent/path.jsonl');
     await expect(gen.next()).rejects.toThrow(/not found/);
-  });
-});
-
-describe('copySessionWithNewId', () => {
-  test('copies and transforms session file', async () => {
-    const sourcePath = join(testDir, 'source.jsonl');
-    const destPath = join(testDir, 'dest.jsonl');
-    const oldId = 'old-session-id';
-    const newId = 'new-session-id';
-
-    const messages = [
-      { sessionId: oldId, uuid: 'msg-1', type: 'user' },
-      { sessionId: oldId, uuid: 'msg-2', type: 'assistant' },
-    ];
-    await writeFile(
-      sourcePath,
-      messages.map((m) => JSON.stringify(m)).join('\n') + '\n'
-    );
-
-    const lineCount = await copySessionWithNewId(sourcePath, destPath, oldId, newId);
-    expect(lineCount).toBe(2);
-
-    // Verify destination file
-    const content = await Bun.file(destPath).text();
-    const lines = content.trim().split('\n');
-    expect(lines.length).toBe(2);
-
-    const parsed1 = JSON.parse(lines[0]);
-    const parsed2 = JSON.parse(lines[1]);
-
-    expect(parsed1.sessionId).toBe(newId);
-    expect(parsed1.uuid).toBe('msg-1'); // Preserved
-    expect(parsed2.sessionId).toBe(newId);
-    expect(parsed2.uuid).toBe('msg-2'); // Preserved
-  });
-
-  test('handles incomplete final line', async () => {
-    const sourcePath = join(testDir, 'source.jsonl');
-    const destPath = join(testDir, 'dest.jsonl');
-
-    await writeFile(
-      sourcePath,
-      '{"sessionId": "old", "uuid": "1"}\n{"incomplete": tru'
-    );
-
-    const lineCount = await copySessionWithNewId(sourcePath, destPath, 'old', 'new');
-    expect(lineCount).toBe(1);
-
-    const content = await Bun.file(destPath).text();
-    const lines = content.trim().split('\n');
-    expect(lines.length).toBe(1);
-    expect(JSON.parse(lines[0]).sessionId).toBe('new');
-  });
-
-  test('throws on invalid JSON in middle', async () => {
-    const sourcePath = join(testDir, 'source.jsonl');
-    const destPath = join(testDir, 'dest.jsonl');
-
-    await writeFile(
-      sourcePath,
-      '{"sessionId": "old"}\n{bad json}\n{"sessionId": "old"}\n'
-    );
-
-    await expect(
-      copySessionWithNewId(sourcePath, destPath, 'old', 'new')
-    ).rejects.toThrow(/Invalid JSON at line 2/);
-  });
-
-  test('throws for non-existent source', async () => {
-    await expect(
-      copySessionWithNewId('/nonexistent/source.jsonl', '/tmp/dest.jsonl', 'old', 'new')
-    ).rejects.toThrow(/not found/);
   });
 });
 

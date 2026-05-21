@@ -100,7 +100,7 @@ sprite create cc-bonsai-native-e2e-<utc>
 sprite exec -s cc-bonsai-native-e2e-<utc> 'claude --version'
 ```
 
-**Documented commands under test:** copy the current operator-facing commands verbatim. Until Story 9 lands the final operator doc, the canonical source for this story is `tweakcc_context_bonsai/CC_BONSAI.md` Step 1 and Step 3:
+**Documented commands under test:** copy the current operator-facing commands from `tweakcc_context_bonsai/README.md` verbatim:
 
 ```bash
 bun install

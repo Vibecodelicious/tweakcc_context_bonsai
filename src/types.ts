@@ -1,29 +1,4 @@
-// types.ts - TypeScript interfaces for Claude Code session snapshots
-
-// ============================================================================
-// Snapshot Types
-// ============================================================================
-
-/**
- * Metadata for a single snapshot, stored in the snapshot index.
- */
-export interface SnapshotMetadata {
-  uuid: string;
-  sourceSessionId: string;
-  label: string;
-  created: string; // ISO timestamp
-  lineCount: number;
-  projectPath: string;
-  truncatedAt?: string; // Description of truncation point
-}
-
-/**
- * Schema for the snapshot index file (.claude-snapshots/index.json)
- */
-export interface SnapshotIndex {
-  version: 1;
-  snapshots: SnapshotMetadata[];
-}
+// types.ts - TypeScript interfaces for Claude Code session files
 
 // ============================================================================
 // Session Message Types
@@ -40,7 +15,7 @@ export interface BaseMessage {
   cwd: string;
   version: string;
   gitBranch: string;
-  // Archive fields - added by ccsnap compact command
+  // Archive fields persisted by Context Bonsai prune operations.
   archived?: boolean;
   archivedAt?: string;    // ISO timestamp
   archivedBy?: string;    // UUID of summary message that replaced this range
@@ -103,10 +78,9 @@ export interface CompactMetadata {
  */
 export interface SummaryMessage {
   type: 'summary';
-  uuid?: string;        // Added by ccsnap compact command
+  uuid?: string;
   summary: string;
   timestamp: string;
-  // Added by ccsnap compact command
   compactMetadata?: CompactMetadata;
 }
 
@@ -115,25 +89,6 @@ export interface SummaryMessage {
  * Use the 'type' field to discriminate between message types.
  */
 export type SessionMessage = UserMessage | AssistantMessage | FileHistorySnapshot | SummaryMessage;
-
-// ============================================================================
-// Process Types
-// ============================================================================
-
-/**
- * Information about a running Claude Code process.
- * Used by the switch command to identify which process to kill.
- */
-export interface ClaudeProcess {
-  pid: number;
-  sessionId: string | null; // null if not started with --resume
-  cwd: string;
-  cmdline: string;
-}
-
-// ============================================================================
-// History Types
-// ============================================================================
 
 /**
  * An entry in ~/.claude/history.jsonl
