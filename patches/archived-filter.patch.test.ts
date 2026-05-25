@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as nodeFs from 'node:fs';
-import { mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -14,7 +14,6 @@ const sessionId = 'session-1';
 let tempDirs: string[] = [];
 
 afterEach(async () => {
-  delete (globalThis as typeof globalThis & { __cbArchivedFilterCache?: unknown }).__cbArchivedFilterCache;
   await Promise.all(tempDirs.map((dir) => rm(dir, { recursive: true, force: true })));
   tempDirs = [];
 });
@@ -36,8 +35,11 @@ describe('archived-filter patch application', () => {
     const patched = archivedFilterPatch.apply(content, fakePatchContext());
 
     expect(countOccurrences(patched, archivedFilterPatch.sentinel)).toBe(1);
-    expect(patched).toContain(`${archivedFilterPatch.sentinel}{const __cbArchivedFilterCache`);
-    expect(patched).toContain('/*cb:archived-filter:v1*/{const __cbArchivedFilterCache');
+    expect(patched).toContain(`${archivedFilterPatch.sentinel}{`);
+    expect(patched).not.toContain('globalThis.__cbArchivedFilterCache');
+    expect(patched).not.toContain('__cbArchivedFilterCache');
+    expect(patched).not.toContain('__cbMtimeMs');
+    expect(patched).not.toContain('__cbEntry.mtimeMs!==__cbMtimeMs');
     expect(patched).toContain('let D=messages.map((X,L)=>');
   });
 
@@ -70,27 +72,43 @@ describe('injected archived UUID filter', () => {
     await writeFile(join(configDir, `archived-${sessionId}.json`), JSON.stringify(['archived-message']));
     const visibilityPredicate = buildPatchedVisibilityPredicate(configDir);
 
-    expect(visibilityPredicate([message('archived-message'), message('active-message')])).toEqual([
-      { role: 'user', content: 'visible content' },
+    expect(visibilityPredicate([message('archived-message', 'archived'), message('active-message', 'active')])).toEqual([
+      { role: 'user', content: 'active' },
     ]);
   });
 
-  test('picks up marker-file changes through mtime-based cache refresh', async () => {
+  test('picks up marker rewrites to another UUID set without forced mtime changes', async () => {
     const configDir = await makeTempDir();
     const markerPath = join(configDir, `archived-${sessionId}.json`);
     await writeFile(markerPath, JSON.stringify(['first-message']));
     const visibilityPredicate = buildPatchedVisibilityPredicate(configDir);
 
-    expect(visibilityPredicate([message('first-message'), message('second-message')])).toEqual([
-      { role: 'user', content: 'visible content' },
+    expect(visibilityPredicate([message('first-message', 'first'), message('second-message', 'second')])).toEqual([
+      { role: 'user', content: 'second' },
     ]);
 
     await writeFile(markerPath, JSON.stringify(['second-message']));
-    const future = new Date(Date.now() + 2000);
-    await utimes(markerPath, future, future);
 
-    expect(visibilityPredicate([message('first-message'), message('second-message')])).toEqual([
-      { role: 'user', content: 'visible content' },
+    expect(visibilityPredicate([message('first-message', 'first'), message('second-message', 'second')])).toEqual([
+      { role: 'user', content: 'first' },
+    ]);
+  });
+
+  test('picks up marker rewrites to an empty array without forced mtime changes', async () => {
+    const configDir = await makeTempDir();
+    const markerPath = join(configDir, `archived-${sessionId}.json`);
+    await writeFile(markerPath, JSON.stringify(['first-message']));
+    const visibilityPredicate = buildPatchedVisibilityPredicate(configDir);
+
+    expect(visibilityPredicate([message('first-message', 'first'), message('second-message', 'second')])).toEqual([
+      { role: 'user', content: 'second' },
+    ]);
+
+    await writeFile(markerPath, JSON.stringify([]));
+
+    expect(visibilityPredicate([message('first-message', 'first'), message('second-message', 'second')])).toEqual([
+      { role: 'user', content: 'first' },
+      { role: 'user', content: 'second' },
     ]);
   });
 
@@ -102,14 +120,13 @@ describe('injected archived UUID filter', () => {
 
     const markerPath = join(configDir, `archived-${sessionId}.json`);
     await writeFile(markerPath, '');
-    const future = new Date(Date.now() + 2000);
-    await utimes(markerPath, future, future);
     expect(visibilityPredicate([message('empty-marker')])).toEqual([{ role: 'user', content: 'visible content' }]);
 
     await writeFile(markerPath, '{not json');
-    const later = new Date(Date.now() + 4000);
-    await utimes(markerPath, later, later);
     expect(visibilityPredicate([message('corrupt-marker')])).toEqual([{ role: 'user', content: 'visible content' }]);
+
+    await writeFile(markerPath, JSON.stringify({ archived: ['not-an-array'] }));
+    expect(visibilityPredicate([message('non-array-marker')])).toEqual([{ role: 'user', content: 'visible content' }]);
   });
 });
 
@@ -151,8 +168,8 @@ function fakePatchContext() {
   };
 }
 
-function message(uuid: string): { type: string; uuid: string; message: { content: string } } {
-  return { type: 'user', uuid, message: { content: 'visible content' } };
+function message(uuid: string, content = 'visible content'): { type: string; uuid: string; message: { content: string } } {
+  return { type: 'user', uuid, message: { content } };
 }
 
 async function makeTempDir(): Promise<string> {
