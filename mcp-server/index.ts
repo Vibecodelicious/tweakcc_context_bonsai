@@ -82,6 +82,7 @@ interface ToolResponseMetadata {
   anchor_id: string;
   range_end_id: string;
   placeholder_text: string;
+  restored_text?: string;
 }
 
 function isUuidPattern(value: string): boolean {
@@ -522,7 +523,8 @@ export async function finalizeRetrieveAfterMutation(
   anchorId: string,
   rangeEndId: string,
   placeholderText: string,
-  clearAnchorMetadata: () => Promise<void>
+  clearAnchorMetadata: () => Promise<void>,
+  restoredText?: string
 ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
   try {
     await clearAnchorMetadata();
@@ -530,12 +532,23 @@ export async function finalizeRetrieveAfterMutation(
     // no-op
   }
 
-  return successResponse(`Retrieve complete. anchor_id=${anchorId}`, {
+  const text = restoredText
+    ? `Retrieve complete. anchor_id=${anchorId}\nRestored content:\n${restoredText}`
+    : `Retrieve complete. anchor_id=${anchorId}`;
+  return successResponse(text, {
     op: "retrieve",
     anchor_id: anchorId,
     range_end_id: rangeEndId,
     placeholder_text: placeholderText,
+    ...(restoredText ? { restored_text: restoredText } : {}),
   });
+}
+
+function renderRetrievedMessages(messages: SessionMessage[]): string {
+  return messages
+    .filter((message) => message.type === "user" || message.type === "assistant")
+    .map((message) => `[${message.type} ${messageUuid(message) ?? "unknown"}]\n${searchableText(message)}`)
+    .join("\n\n");
 }
 
 export function validatePruneArgs(args: PruneArgs):
@@ -742,9 +755,10 @@ async function handleRetrieveContext(args: RetrieveArgs): Promise<{ content: Arr
     return plainText(COMPATIBILITY_ERROR);
   }
 
-  const anchorMessage = currentMessages.find(
-    (message) => messageUuid(message) === validated.anchorId
-  ) as (SessionMessage & { context_bonsai_v2?: AnchorArchiveMetadata }) | undefined;
+  const anchorIndex = currentMessages.findIndex((message) => messageUuid(message) === validated.anchorId);
+  const anchorMessage = currentMessages[anchorIndex] as
+    | (SessionMessage & { context_bonsai_v2?: AnchorArchiveMetadata })
+    | undefined;
 
   if (!anchorMessage) {
     return plainText(RETRIEVE_NOT_FOUND);
@@ -761,6 +775,11 @@ async function handleRetrieveContext(args: RetrieveArgs): Promise<{ content: Arr
     metadata.summary,
     metadata.index_terms
   );
+  const rangeEndIndex = currentMessages.findIndex((message) => messageUuid(message) === metadata.range_end_id);
+  const restoredText =
+    anchorIndex >= 0 && rangeEndIndex >= anchorIndex
+      ? renderRetrievedMessages(currentMessages.slice(anchorIndex, rangeEndIndex + 1))
+      : "";
 
   try {
     await retrieveSession(sessionPath, [metadata.summary_uuid]);
@@ -780,7 +799,8 @@ async function handleRetrieveContext(args: RetrieveArgs): Promise<{ content: Arr
       }
     }
     await writeJsonlAtomic(sessionPath, refreshed);
-    }
+    },
+    restoredText
   );
 }
 

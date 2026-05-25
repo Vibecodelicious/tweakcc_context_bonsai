@@ -14,7 +14,6 @@ const sessionId = 'session-1';
 let tempDirs: string[] = [];
 
 afterEach(async () => {
-  delete (globalThis as typeof globalThis & { __cbArchivedFilterCache?: unknown }).__cbArchivedFilterCache;
   await Promise.all(tempDirs.map((dir) => rm(dir, { recursive: true, force: true })));
   tempDirs = [];
 });
