@@ -150,21 +150,34 @@ describe("context-bonsai-v2 validation", () => {
   });
 
   test("retrieve post-mutation cleanup failure still reports success", async () => {
+    const restoredText = "[user anchor-123]\nrestored body";
     const response = await finalizeRetrieveAfterMutation(
       "anchor-123",
       "anchor-456",
       "placeholder body",
       async () => {
       throw new Error("simulated cleanup failure");
-      }
+      },
+      restoredText
     );
 
+    const text = response.content[0]?.text ?? "";
+    const metadataBlock = text.match(/<context-bonsai-tool-response encoding="base64">([^<]+)<\/context-bonsai-tool-response>/);
+
+    expect(text).toContain(`Restored content:\n${restoredText}`);
+    expect(metadataBlock).not.toBeNull();
+    expect(JSON.parse(Buffer.from(metadataBlock![1], "base64").toString("utf8"))).toEqual({
+      op: "retrieve",
+      anchor_id: "anchor-123",
+      range_end_id: "anchor-456",
+      placeholder_text: "placeholder body",
+    });
     expect(response).toEqual({
       content: [
         {
           type: "text",
           text:
-            "Retrieve complete. anchor_id=anchor-123\n" +
+            `Retrieve complete. anchor_id=anchor-123\nRestored content:\n${restoredText}\n` +
             encodeToolResponseMetadata({
               op: "retrieve",
               anchor_id: "anchor-123",

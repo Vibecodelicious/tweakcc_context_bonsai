@@ -82,7 +82,6 @@ interface ToolResponseMetadata {
   anchor_id: string;
   range_end_id: string;
   placeholder_text: string;
-  restored_text?: string;
 }
 
 function isUuidPattern(value: string): boolean {
@@ -540,7 +539,6 @@ export async function finalizeRetrieveAfterMutation(
     anchor_id: anchorId,
     range_end_id: rangeEndId,
     placeholder_text: placeholderText,
-    ...(restoredText ? { restored_text: restoredText } : {}),
   });
 }
 
