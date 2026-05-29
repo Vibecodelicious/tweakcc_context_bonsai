@@ -7,16 +7,20 @@ import {
   ARCHIVED_FILTER_SENTINEL,
   PATCH_MISSING_ERROR,
   archivedFilterPatchPresentInAny,
+  assertRunningClaudeHasArchivedFilterPatch,
   encodeToolResponseMetadata,
   finalizeRetrieveAfterMutation,
   fileContainsSentinel,
+  findClaudeProcessContext,
   isIdSelectorPattern,
   listContextBonsaiTools,
   loadSearchableMessages,
+  resolveRunningClaudeExecutableCandidates,
   routeContextBonsaiTool,
   resolveUniqueBoundary,
   validatePruneArgs,
   validateRetrieveArgs,
+  type ProcReader,
 } from "./index";
 
 let testDir = "";
@@ -465,5 +469,179 @@ describe("loadSearchableMessages prune tool detection", () => {
     const messages = await loadSearchableMessages(sessionPath);
 
     expect(messages[0]?.hasPruneToolUse).toBe(false);
+  });
+});
+
+describe("discovery layer — running-binary identification", () => {
+  interface SyntheticProcess {
+    ppid: string;
+    argv: string[];
+    exe?: string;
+  }
+
+  // Build a ProcReader over a synthetic process tree. The walk starts at
+  // String(process.pid), so the tree is keyed with that pid as the MCP server.
+  function syntheticProcReader(tree: Record<string, SyntheticProcess>): ProcReader {
+    return {
+      async readParentPid(pid) {
+        return tree[pid]?.ppid ?? null;
+      },
+      async readCmdline(pid) {
+        return tree[pid]?.argv ?? [];
+      },
+      async readExeLink(pid) {
+        return tree[pid]?.exe ?? null;
+      },
+    };
+  }
+
+  const mcpPid = String(process.pid);
+  const bunExe = "/home/op/.bun/bin/bun";
+
+  // Pre-fix detection logic, reconstructed for a fail-pre/pass-post demonstration.
+  // The shipped pre-fix guard only consulted an ancestor's /proc/<pid>/exe AFTER
+  // that ancestor passed a sessionId (--resume) gate or an argv-name gate
+  // (argv[0] === "claude" | endsWith("/claude") | includes "@anthropic-ai/claude-code").
+  // For a directly-launched version-named native binary with no --resume, no gate
+  // passes, so the exe link is never read and the candidate set is empty.
+  async function preFixResolveCandidates(
+    proc: ProcReader
+  ): Promise<string[]> {
+    const candidates: string[] = [];
+    let currentPid = mcpPid;
+    for (let depth = 0; depth < 10; depth += 1) {
+      const parentPid = await proc.readParentPid(currentPid);
+      if (!parentPid || parentPid === "0" || parentPid === "1") break;
+      const argv = await proc.readCmdline(parentPid);
+      const command = argv[0] ?? "";
+      const looksLikeClaude =
+        command === "claude" ||
+        command.endsWith("/claude") ||
+        argv.some((arg) => arg.includes("@anthropic-ai/claude-code"));
+      if (looksLikeClaude) {
+        const exe = await proc.readExeLink(parentPid);
+        if (exe) candidates.push(exe);
+        break;
+      }
+      currentPid = parentPid;
+    }
+    return [...new Set(candidates)];
+  }
+
+  test("shape 1: direct native version-named binary, no --resume → resolves to that binary", async () => {
+    const nativeBinary = "/home/op/.local/share/claude/versions/2.1.143-cbfix";
+    const tree: Record<string, SyntheticProcess> = {
+      // bun run mcp-server/index.ts (bun does not exec-replace)
+      [mcpPid]: { ppid: "5000", argv: [bunExe, "run", "mcp-server/index.ts"], exe: bunExe },
+      // direct parent IS the version-named native binary, launched with no --resume
+      "5000": { ppid: "4000", argv: [nativeBinary], exe: nativeBinary },
+      "4000": { ppid: "3000", argv: ["/bin/bash"], exe: "/usr/bin/bash" },
+      "3000": { ppid: "1", argv: ["/usr/bin/konsole"], exe: "/usr/bin/konsole" },
+    };
+    const proc = syntheticProcReader(tree);
+
+    // Pre-fix: the argv-name gate never matches the versioned path, so detection
+    // yields zero candidates and the guard would false-refuse.
+    expect(await preFixResolveCandidates(proc)).toEqual([]);
+
+    // Post-fix: the exe-of-ancestor walk resolves to the actual running binary.
+    expect(await resolveRunningClaudeExecutableCandidates(proc)).toContain(nativeBinary);
+  });
+
+  test("shape 2: npm cli.js launch (node parent) → resolves to the running node exe", async () => {
+    const nodeExe = "/usr/bin/node";
+    const tree: Record<string, SyntheticProcess> = {
+      [mcpPid]: { ppid: "5100", argv: [bunExe, "run", "mcp-server/index.ts"], exe: bunExe },
+      "5100": {
+        ppid: "4100",
+        argv: [nodeExe, "/home/op/.npm/cli.js", "--mcp"],
+        exe: nodeExe,
+      },
+      "4100": { ppid: "1", argv: ["/bin/bash"], exe: "/usr/bin/bash" },
+    };
+    const proc = syntheticProcReader(tree);
+
+    // The exe walk surfaces the running node interpreter (the binary that is
+    // actually executing the patched cli.js bundle in memory). Note the cli.js
+    // path is NOT pushed as a candidate: only exe-of-ancestor paths are used.
+    const candidates = await resolveRunningClaudeExecutableCandidates(proc);
+    expect(candidates).toContain(nodeExe);
+    expect(candidates).not.toContain("/home/op/.npm/cli.js");
+  });
+
+  test("shape 3: --resume launch → resolves binary and findClaudeProcessContext yields the sessionId", async () => {
+    const claudeShim = "/home/op/.local/bin/claude";
+    const sessionId = "abcdef01-2345-6789-abcd-ef0123456789";
+    const tree: Record<string, SyntheticProcess> = {
+      [mcpPid]: { ppid: "5200", argv: [bunExe, "run", "mcp-server/index.ts"], exe: bunExe },
+      "5200": {
+        ppid: "4200",
+        argv: ["claude", "--resume", sessionId],
+        exe: claudeShim,
+      },
+      "4200": { ppid: "1", argv: ["/bin/bash"], exe: "/usr/bin/bash" },
+    };
+    const proc = syntheticProcReader(tree);
+
+    expect(await resolveRunningClaudeExecutableCandidates(proc)).toContain(claudeShim);
+
+    const context = await findClaudeProcessContext(proc);
+    expect(context?.sessionId).toBe(sessionId);
+  });
+
+  test("shape 4: no Claude ancestor identifiable (no exe links) → fails closed (empty)", async () => {
+    const tree: Record<string, SyntheticProcess> = {
+      // No exe link is resolvable for any ancestor (restricted /proc / non-Linux).
+      [mcpPid]: { ppid: "5300", argv: [bunExe, "run", "mcp-server/index.ts"] },
+      "5300": { ppid: "1", argv: ["/bin/bash"] },
+    };
+    const proc = syntheticProcReader(tree);
+
+    expect(await resolveRunningClaudeExecutableCandidates(proc)).toEqual([]);
+  });
+
+  test("guard scans the running binary's exe only; a stale patched cli.js on disk does not satisfy it", async () => {
+    testDir = join(tmpdir(), `mcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(testDir, { recursive: true });
+
+    // A stale, PATCHED cli.js sits on disk (carries the sentinel) ...
+    const stalePatchedCli = join(testDir, "cli.js");
+    await writeFile(stalePatchedCli, `#!/usr/bin/env node\n${ARCHIVED_FILTER_SENTINEL}\n`, "utf8");
+    // ... but the binary that is actually RUNNING is unpatched.
+    const runningUnpatched = join(testDir, "claude-running");
+    await writeFile(runningUnpatched, "#!/usr/bin/env node\nconsole.log('stock');\n", "utf8");
+
+    const tree: Record<string, SyntheticProcess> = {
+      // argv mentions the stale patched cli.js, but exe is the unpatched binary.
+      [mcpPid]: {
+        ppid: "5400",
+        argv: ["/usr/bin/node", stalePatchedCli, "--mcp"],
+        exe: runningUnpatched,
+      },
+      "5400": { ppid: "1", argv: ["/bin/bash"], exe: "/usr/bin/bash" },
+    };
+    const proc = syntheticProcReader(tree);
+
+    // Guard must fail closed: it scans exe-of-ancestor (unpatched), never the
+    // argv-derived stale cli.js, so the dangerous false-positive does not occur.
+    expect(await assertRunningClaudeHasArchivedFilterPatch(proc)).toBe(false);
+  });
+
+  test("guard returns true when the running binary's exe carries the sentinel", async () => {
+    testDir = join(tmpdir(), `mcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(testDir, { recursive: true });
+    const patchedBinary = join(testDir, "claude-native");
+    await writeFile(patchedBinary, Buffer.concat([
+      Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x01]),
+      Buffer.from(`bundle ${ARCHIVED_FILTER_SENTINEL} tail`, "utf8"),
+    ]));
+
+    const tree: Record<string, SyntheticProcess> = {
+      [mcpPid]: { ppid: "5500", argv: [bunExe, "run", "mcp-server/index.ts"], exe: bunExe },
+      "5500": { ppid: "1", argv: [patchedBinary], exe: patchedBinary },
+    };
+    const proc = syntheticProcReader(tree);
+
+    expect(await assertRunningClaudeHasArchivedFilterPatch(proc)).toBe(true);
   });
 });

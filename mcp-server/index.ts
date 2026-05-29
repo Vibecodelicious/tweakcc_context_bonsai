@@ -9,7 +9,6 @@ import {
 import { createReadStream } from "fs";
 import { rename, writeFile } from "fs/promises";
 import { readlink } from "fs/promises";
-import { isAbsolute, resolve } from "path";
 import { findCurrentSession, findSessionPath, readSessionMessages } from "../src/lib/session";
 import { addArchivedMarkerEntries, markMessagesArchived, retrieveSession } from "../src/lib/compact";
 import type { SessionMessage, CompactMetadata } from "../src/types";
@@ -69,8 +68,35 @@ interface ClaudeProcessContext {
   pid: string;
   sessionId: string;
   cwd?: string;
-  executableCandidates: string[];
 }
+
+// Injectable seam over the three /proc primitives the discovery layer needs.
+// The default reads real /proc; tests pass synthetic process trees so discovery
+// can be exercised without a live Claude process. Mirrors the PruneDependencies
+// injection pattern used for prune.
+export interface ProcReader {
+  readParentPid: (pid: string) => Promise<string | null>;
+  readCmdline: (pid: string) => Promise<string[]>;
+  readExeLink: (pid: string) => Promise<string | null>;
+}
+
+const defaultProcReader: ProcReader = {
+  readParentPid,
+  async readCmdline(pid: string): Promise<string[]> {
+    try {
+      return splitProcCmdline(await Bun.file(`/proc/${pid}/cmdline`).text());
+    } catch {
+      return [];
+    }
+  },
+  async readExeLink(pid: string): Promise<string | null> {
+    try {
+      return await readlink(`/proc/${pid}/exe`);
+    } catch {
+      return null;
+    }
+  },
+};
 
 interface PruneDependencies {
   discoverSessionPath: () => Promise<string>;
@@ -173,39 +199,18 @@ function sessionIdFromArgv(argv: string[]): string | null {
   return null;
 }
 
-function executableCandidatesFromArgv(argv: string[], cwd?: string): string[] {
-  const candidates: string[] = [];
-
-  for (const arg of argv) {
-    if (!arg || arg.startsWith("-")) {
-      continue;
-    }
-
-    if (arg.endsWith("cli.js") || arg.includes("@anthropic-ai/claude-code")) {
-      candidates.push(isAbsolute(arg) ? arg : resolve(cwd ?? process.cwd(), arg));
-    }
-  }
-
-  return candidates;
-}
-
-async function findClaudeProcessContext(): Promise<ClaudeProcessContext | null> {
+export async function findClaudeProcessContext(
+  proc: ProcReader = defaultProcReader
+): Promise<ClaudeProcessContext | null> {
   let currentPid = String(process.pid);
 
   for (let depth = 0; depth < 10; depth += 1) {
-    const parentPid = await readParentPid(currentPid);
+    const parentPid = await proc.readParentPid(currentPid);
     if (!parentPid || parentPid === "0" || parentPid === "1") {
       break;
     }
 
-    let cmdline = "";
-    let argv: string[] = [];
-    try {
-      cmdline = await Bun.file(`/proc/${parentPid}/cmdline`).text();
-      argv = splitProcCmdline(cmdline);
-    } catch {
-      argv = [];
-    }
+    const argv = await proc.readCmdline(parentPid);
 
     const sessionId = sessionIdFromArgv(argv);
     if (sessionId) {
@@ -216,19 +221,7 @@ async function findClaudeProcessContext(): Promise<ClaudeProcessContext | null> 
         cwd = undefined;
       }
 
-      const executableCandidates = executableCandidatesFromArgv(argv, cwd);
-      try {
-        executableCandidates.push(await readlink(`/proc/${parentPid}/exe`));
-      } catch {
-        // Non-Linux or restricted /proc: fall back to cmdline-derived candidates.
-      }
-
-      return {
-        pid: parentPid,
-        sessionId,
-        cwd,
-        executableCandidates: [...new Set(executableCandidates)],
-      };
+      return { pid: parentPid, sessionId, cwd };
     }
 
     currentPid = parentPid;
@@ -237,49 +230,34 @@ async function findClaudeProcessContext(): Promise<ClaudeProcessContext | null> 
   return null;
 }
 
-export async function resolveRunningClaudeExecutableCandidates(): Promise<string[]> {
-  const claudeProcess = await findClaudeProcessContext();
-  if (claudeProcess) {
-    return claudeProcess.executableCandidates;
-  }
-
-  return findClaudeAncestorExecutableCandidates();
-}
-
-async function findClaudeAncestorExecutableCandidates(): Promise<string[]> {
+// Defect A fix: identify the running Claude binary by the authoritative signal —
+// each ancestor's /proc/<pid>/exe link — walking from the MCP server pid up to
+// pid 1, independent of --resume or argv[0] naming. The exe link of the real
+// Claude process resolves directly to the running binary even when it is a
+// version-named native binary launched directly (argv[0] = the versioned path),
+// where argv-name matching ("claude"/"cli.js"/"@anthropic-ai/claude-code")
+// fails. This mirrors the launch-shape-independent ancestor walk already used by
+// discoverSessionPath (its cwd-based session fallback).
+//
+// Only exe-of-ancestor paths are returned. argv-derived candidates (e.g. a path
+// ending in cli.js read out of cmdline) are deliberately excluded: a stale or
+// unrelated patched cli.js on disk could otherwise satisfy the guard while a
+// different, unpatched binary is actually running — a dangerous false-positive.
+export async function resolveRunningClaudeExecutableCandidates(
+  proc: ProcReader = defaultProcReader
+): Promise<string[]> {
   const candidates: string[] = [];
   let currentPid = String(process.pid);
 
-  for (let depth = 0; depth < 10; depth += 1) {
-    const parentPid = await readParentPid(currentPid);
+  for (let depth = 0; depth < 12; depth += 1) {
+    const parentPid = await proc.readParentPid(currentPid);
     if (!parentPid || parentPid === "0" || parentPid === "1") {
       break;
     }
 
-    let argv: string[] = [];
-    try {
-      argv = splitProcCmdline(await Bun.file(`/proc/${parentPid}/cmdline`).text());
-    } catch {
-      argv = [];
-    }
-
-    const command = argv[0] ?? "";
-    const looksLikeClaude = command === "claude" || command.endsWith("/claude") || argv.some((arg) => arg.includes("@anthropic-ai/claude-code"));
-    if (looksLikeClaude) {
-      let cwd: string | undefined;
-      try {
-        cwd = await readlink(`/proc/${parentPid}/cwd`);
-      } catch {
-        cwd = undefined;
-      }
-
-      candidates.push(...executableCandidatesFromArgv(argv, cwd));
-      try {
-        candidates.push(await readlink(`/proc/${parentPid}/exe`));
-      } catch {
-        // Non-Linux or restricted /proc: rely on cmdline-derived candidates.
-      }
-      break;
+    const exe = await proc.readExeLink(parentPid);
+    if (exe) {
+      candidates.push(exe);
     }
 
     currentPid = parentPid;
@@ -324,9 +302,12 @@ export async function archivedFilterPatchPresentInAny(paths: string[]): Promise<
   return false;
 }
 
-async function assertRunningClaudeHasArchivedFilterPatch(): Promise<boolean> {
-  const candidates = await resolveRunningClaudeExecutableCandidates();
+export async function assertRunningClaudeHasArchivedFilterPatch(
+  proc: ProcReader = defaultProcReader
+): Promise<boolean> {
+  const candidates = await resolveRunningClaudeExecutableCandidates(proc);
   if (candidates.length === 0) {
+    // Fail closed: no ancestor binary could be identified.
     return false;
   }
 
