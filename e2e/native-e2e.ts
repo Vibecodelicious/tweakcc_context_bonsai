@@ -70,6 +70,7 @@ interface Args {
   preSession?: string;
   fromUuid?: string;
   toUuid?: string;
+  marker?: string;
 }
 
 // Guard the CLI dispatch behind import.meta.main so this module can be imported
@@ -207,24 +208,33 @@ async function protocolAOracle(args: Args): Promise<void> {
   if (!args.secret) throw new Error('protocol-a-oracle requires --secret <literal>');
 
   const lines = (await readFile(args.session, 'utf8')).split('\n').filter(Boolean);
+  const rows = lines.map((line) => {
+    try {
+      return JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  });
+  const markerSet = resolveMarkerSet(
+    args.marker,
+    args.session,
+    rows.filter((r): r is Record<string, unknown> => r !== null)
+  );
   const occurrences: Array<{ line: number; uuid?: string; type?: string; archived: boolean; summary: boolean }> = [];
 
-  lines.forEach((line, index) => {
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      occurrences.push({ line: index + 1, archived: false, summary: false });
+  rows.forEach((parsed, index) => {
+    if (parsed === null) {
+      // A non-JSON line can never carry the secret as a model transcript row.
       return;
     }
 
     if (!isModelTranscriptRow(parsed) || !flatten(parsed).includes(args.secret as string)) return;
-    const metadata = parsed.context_bonsai_v2 as { archived?: unknown } | undefined;
     occurrences.push({
       line: index + 1,
       uuid: typeof parsed.uuid === 'string' ? parsed.uuid : undefined,
       type: typeof parsed.type === 'string' ? parsed.type : undefined,
-      archived: metadata?.archived === true,
+      // Archived = hidden from the model: top-level `archived` flag or marker UUID.
+      archived: isArchivedRow(parsed, markerSet),
       summary: parsed.type === 'summary',
     });
   });
@@ -248,6 +258,66 @@ async function protocolAOracle(args: Args): Promise<void> {
 
 function isModelTranscriptRow(parsed: Record<string, unknown>): boolean {
   return parsed.type === 'user' || parsed.type === 'assistant' || parsed.type === 'summary';
+}
+
+// Archival is recorded by the runtime as a TOP-LEVEL `archived` flag on the
+// user/assistant row (see src/lib/compact.ts markMessagesArchived), and the set
+// of archived UUIDs is persisted to the marker file
+// `~/.claude/archived-<sessionId>.json` (addArchivedMarkerEntries), which the
+// archived-filter patch reads to hide those rows from the model-visible
+// transcript. It is NOT recorded as a per-row `context_bonsai_v2.archived` field
+// — only the anchor row carries `context_bonsai_v2` (the anchor metadata), and
+// the placeholder summary carries `context_bonsai_v2.anchor_id`. Detection here
+// must therefore read the top-level flag and/or the marker file.
+function rowUuid(row: Record<string, unknown>): string | undefined {
+  return typeof row.uuid === 'string' ? row.uuid : undefined;
+}
+
+function isArchivedRow(row: Record<string, unknown>, markerSet: Set<string>): boolean {
+  if (row.archived === true) return true;
+  const uuid = rowUuid(row);
+  return uuid !== undefined && markerSet.has(uuid);
+}
+
+// The marker file is `~/.claude/archived-<sessionId>.json` where <sessionId> is
+// the session JSONL basename. An explicit --marker path overrides; otherwise it
+// is derived from the session path, then (if missing) re-derived from the
+// `sessionId` field on the rows.
+function markerPathForSession(sessionPath: string): string {
+  const base = sessionPath.slice(sessionPath.lastIndexOf('/') + 1);
+  const sessionId = base.endsWith('.jsonl') ? base.slice(0, -'.jsonl'.length) : base;
+  return `${homedir()}/.claude/archived-${sessionId}.json`;
+}
+
+function loadMarkerUuids(markerPath: string): Set<string> {
+  if (!existsSync(markerPath)) return new Set();
+  try {
+    const parsed = JSON.parse(readFileSync(markerPath, 'utf8')) as unknown;
+    return new Set(Array.isArray(parsed) ? parsed.filter((u): u is string => typeof u === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+// Resolve the archived-UUID set for a session: explicit --marker, else derived
+// from the session path, else derived from a `sessionId` field on the rows.
+function resolveMarkerSet(
+  explicitMarker: string | undefined,
+  sessionPath: string,
+  rows: Array<Record<string, unknown>>
+): Set<string> {
+  if (explicitMarker) return loadMarkerUuids(explicitMarker);
+
+  const byPath = loadMarkerUuids(markerPathForSession(sessionPath));
+  if (byPath.size > 0) return byPath;
+
+  const sessionId = rows
+    .map((r) => (typeof r.sessionId === 'string' ? r.sessionId : undefined))
+    .find((s): s is string => Boolean(s));
+  if (sessionId) {
+    return loadMarkerUuids(`${homedir()}/.claude/archived-${sessionId}.json`);
+  }
+  return byPath;
 }
 
 // ---------------------------------------------------------------------------
@@ -320,8 +390,14 @@ interface PruneEffectResult {
   archivedRangePresentPre: boolean;
   archivedRangeVisiblePost: boolean;
   placeholderPresentPost: boolean;
-  preVisibleFootprintChars: number;
-  postVisibleFootprintChars: number;
+  // Model-visible character footprint contributed by the ARCHIVED RANGE rows
+  // specifically — pre-prune they are visible, post-prune they are hidden by the
+  // archived-filter (top-level flag / marker). This isolates the prune's effect
+  // from any new rows the drive turn appends (which would confound a whole-
+  // transcript char count). A real prune drives the range's visible footprint to
+  // ~0 (only the small placeholder remains).
+  rangeVisibleCharsPre: number;
+  rangeVisibleCharsPost: number;
   footprintDropped: boolean;
 }
 
@@ -331,11 +407,6 @@ function rowText(row: Record<string, unknown>): string {
   return flatten(message?.content);
 }
 
-function isArchivedRow(row: Record<string, unknown>): boolean {
-  const meta = row.context_bonsai_v2 as { archived?: unknown } | undefined;
-  return meta?.archived === true;
-}
-
 function readJsonlRows(path: string): Array<Record<string, unknown>> {
   return readFileSync(path, 'utf8')
     .split('\n')
@@ -343,14 +414,22 @@ function readJsonlRows(path: string): Array<Record<string, unknown>> {
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-// Model-visible footprint proxy: sum the searchable-text length of every model
-// transcript row that is NOT an archived original. The archived-filter seam hides
-// archived followers from the live request path, so a real prune drops this sum.
-function visibleFootprintChars(rows: Array<Record<string, unknown>>): number {
+// Model-visible character footprint contributed by a specific set of range
+// UUIDs: sum the searchable-text length of those rows that are NOT hidden by the
+// archived-filter (top-level `archived` flag or marker set). Scoping to the range
+// rows isolates the prune's effect from any unrelated rows the drive turn appends
+// to the post snapshot (which would inflate a whole-transcript char count).
+function rangeVisibleChars(
+  rows: Array<Record<string, unknown>>,
+  rangeUuids: Set<string>,
+  markerSet: Set<string>
+): number {
   let total = 0;
   for (const row of rows) {
     if (!isModelTranscriptRow(row)) continue;
-    if (isArchivedRow(row)) continue;
+    const uuid = rowUuid(row);
+    if (uuid === undefined || !rangeUuids.has(uuid)) continue;
+    if (isArchivedRow(row, markerSet)) continue;
     total += rowText(row).length;
   }
   return total;
@@ -358,11 +437,18 @@ function visibleFootprintChars(rows: Array<Record<string, unknown>>): number {
 
 // Verify a prune actually removed the archived range from the model-visible
 // transcript, comparing the pre-prune and post-prune session JSONL.
+//
+// preMarkerSet / postMarkerSet are the archived-UUID sets for the pre and post
+// snapshots (top-level `archived` flag is also honored per-row). The pre snapshot
+// normally has an empty marker set (nothing archived yet); the post snapshot's
+// marker set lists the archived range.
 export function analyzePruneEffect(
   preRows: Array<Record<string, unknown>>,
   postRows: Array<Record<string, unknown>>,
   fromUuid: string,
-  toUuid: string
+  toUuid: string,
+  preMarkerSet: Set<string> = new Set(),
+  postMarkerSet: Set<string> = new Set()
 ): PruneEffectResult {
   const rangeUuids = collectRangeUuids(preRows, fromUuid, toUuid);
   const archivedRangePresentPre = rangeUuids.length > 0;
@@ -374,22 +460,24 @@ export function analyzePruneEffect(
   }
 
   // The range is "visible" post-prune if any of its rows still appear as a
-  // non-archived model transcript row.
+  // non-archived model transcript row (top-level `archived` flag false AND not in
+  // the post marker set).
   const archivedRangeVisiblePost = rangeUuids.some((uuid) => {
     const row = postByUuid.get(uuid);
-    return row !== undefined && isModelTranscriptRow(row) && !isArchivedRow(row);
+    return row !== undefined && isModelTranscriptRow(row) && !isArchivedRow(row, postMarkerSet);
   });
 
   const placeholderPresentPost = postRows.some(
     (row) => row.type === 'summary' && (row.context_bonsai_v2 as { anchor_id?: unknown } | undefined)?.anchor_id === fromUuid
   );
 
-  const preVisibleFootprintChars = visibleFootprintChars(preRows);
-  const postVisibleFootprintChars = visibleFootprintChars(postRows);
-  const footprintDropped = postVisibleFootprintChars < preVisibleFootprintChars;
+  const rangeSet = new Set(rangeUuids);
+  const rangeVisibleCharsPre = rangeVisibleChars(preRows, rangeSet, preMarkerSet);
+  const rangeVisibleCharsPost = rangeVisibleChars(postRows, rangeSet, postMarkerSet);
+  const footprintDropped = rangeVisibleCharsPost < rangeVisibleCharsPre;
 
   let verdict: PruneEffectResult['verdict'] = 'PASS';
-  let reason = 'archived range removed from model-visible transcript and footprint dropped';
+  let reason = 'archived range removed from model-visible transcript and its footprint dropped';
   if (!archivedRangePresentPre) {
     verdict = 'BLOCKED';
     reason = 'pre-prune session does not contain the from..to range; cannot evaluate effect';
@@ -401,7 +489,7 @@ export function analyzePruneEffect(
     reason = 'no placeholder summary anchored at fromUuid in the post-prune transcript';
   } else if (!footprintDropped) {
     verdict = 'FAIL';
-    reason = 'model-visible footprint did not drop after prune';
+    reason = 'archived-range model-visible footprint did not drop after prune';
   }
 
   return {
@@ -411,8 +499,8 @@ export function analyzePruneEffect(
     archivedRangePresentPre,
     archivedRangeVisiblePost,
     placeholderPresentPost,
-    preVisibleFootprintChars,
-    postVisibleFootprintChars,
+    rangeVisibleCharsPre,
+    rangeVisibleCharsPost,
     footprintDropped,
   };
 }
@@ -441,7 +529,23 @@ async function pruneEffectCommand(args: Args): Promise<void> {
 
   const preRows = readJsonlRows(args.preSession);
   const postRows = readJsonlRows(args.session);
-  const result = analyzePruneEffect(preRows, postRows, args.fromUuid, args.toUuid);
+  // The pre snapshot is the un-pruned baseline: its marker set is empty by
+  // definition. (Do NOT derive it from the live sessionId — the live marker file
+  // is shared by session id and now reflects POST-prune state, which would wrongly
+  // treat the pre range as already archived.) The pre rows carry no top-level
+  // `archived` flag either, so the full pre range is visible.
+  const preMarkerSet = new Set<string>();
+  // The post snapshot's archived set: explicit --marker, else derived from the
+  // session path / sessionId; the top-level `archived` flag on rows is also honored.
+  const postMarkerSet = resolveMarkerSet(args.marker, args.session, postRows);
+  const result = analyzePruneEffect(
+    preRows,
+    postRows,
+    args.fromUuid,
+    args.toUuid,
+    preMarkerSet,
+    postMarkerSet
+  );
   await writeJson(args.out, result);
   if (result.verdict === 'FAIL') process.exitCode = 1;
 }
@@ -661,6 +765,9 @@ function parseArgs(args: string[]): Args {
     } else if (arg === '--to-uuid') {
       parsed.toUuid = requireValue(arg, next);
       index += 1;
+    } else if (arg === '--marker') {
+      parsed.marker = requireValue(arg, next);
+      index += 1;
     } else if (arg === '--help' || arg === '-h') {
       parsed.command = 'help';
     } else {
@@ -678,13 +785,16 @@ function requireValue(flag: string, value: string | undefined): string {
 function usage(): void {
   console.log(`Usage:
   bun run e2e/native-e2e.ts artifact-evidence [--bundle extracted.js] [--manifest manifest.json] [--out evidence.json]
-  bun run e2e/native-e2e.ts protocol-a-oracle --session session.jsonl --secret SECRET [--out oracle.json]
+  bun run e2e/native-e2e.ts protocol-a-oracle --session session.jsonl --secret SECRET [--marker archived-<sid>.json] [--out oracle.json]
+      Archival is read from the top-level row 'archived' flag and the marker file
+      (~/.claude/archived-<sessionId>.json, derived from --session if --marker is omitted).
   bun run e2e/native-e2e.ts prune-guard-live [--binary ~/.local/share/claude/versions/<v>] [--prompt "..."] [--cwd DIR] [--out result.json]
       Launch the native version-named binary DIRECTLY (argv[0] = the binary, no --resume),
       assert that launch shape from /proc/<pid>/cmdline, and drive a live prune.
       Requires provider credentials; BLOCKED (not FAIL) if the model drive cannot complete.
-  bun run e2e/native-e2e.ts prune-effect --pre-session pre.jsonl --session post.jsonl --from-uuid UUID --to-uuid UUID [--out effect.json]
+  bun run e2e/native-e2e.ts prune-effect --pre-session pre.jsonl --session post.jsonl --from-uuid UUID --to-uuid UUID [--marker archived-<sid>.json] [--out effect.json]
       Verify a prune actually removed the archived range from the model-visible transcript
       (content removal + input-token-footprint drop) by comparing pre/post session JSONL.
+      Archival is read from the top-level row 'archived' flag and the post-session marker file.
 `);
 }

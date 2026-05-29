@@ -70,14 +70,20 @@ The harness spawns the binary directly (`argv0 = <versioned path>`) and reads
 
 ### Effect analysis (`prune-effect`) — exercised offline
 
-`bun run e2e/native-e2e.ts prune-effect --pre-session pre.jsonl --session post.jsonl --from-uuid <a> --to-uuid <b>`:
+`bun run e2e/native-e2e.ts prune-effect --pre-session pre.jsonl --session post.jsonl --from-uuid <a> --to-uuid <b>`.
+Archival is detected from the **top-level `message.archived` flag** and the
+**marker file** (`~/.claude/archived-<sessionId>.json`), matching the real runtime
+shape; the footprint metric is scoped to the archived range's rows. Unit fixtures
+in `e2e/native-e2e.test.ts` use that real shape and cover:
 
-- Real-prune fixture → `verdict: PASS`, `archivedRangeVisiblePost: false`,
-  `placeholderPresentPost: true`, `footprintDropped: true` (footprint chars
-  dropped, e.g. 195 → 87). Exit 0.
-- Bug-shape fixture (post == pre, no archived flags, no placeholder) →
-  `verdict: FAIL`, `archivedRangeVisiblePost: true`, `footprintDropped: false`.
-  Exit 1. This is the "success-shaped refusal, content remains" reproduction.
+- Real-prune via top-level flag → `verdict: PASS`, `archivedRangeVisiblePost: false`,
+  `placeholderPresentPost: true`, `rangeVisibleCharsPost: 0` (< pre), `footprintDropped: true`.
+- Real-prune via marker file only (rows lack the top-level flag) → `verdict: PASS`,
+  proving the marker path works independently.
+- Bug-shape (post == pre, no archived flag, no marker, no placeholder) →
+  `verdict: FAIL`, `archivedRangeVisiblePost: true`, `footprintDropped: false`. This
+  is the "success-shaped refusal, content remains" reproduction.
+- Archived-but-no-placeholder → `FAIL`; range-absent-pre → `BLOCKED`.
 
 ## Live Model-Driven Run — EXECUTED 2026-05-29 (ambient OAuth login)
 
@@ -130,16 +136,34 @@ plus the model-visible transcript prefix size. Verified against the actual sessi
   the post-prune session: higher new-content footprint (`cache_creation` 12706 vs the
   patched 8404), confirming the unpatched runtime still carries the archived rows.
 
-**Harness-oracle note (honest):** the offline `prune-effect` JSONL-diff command
-returned `FAIL` on the live session (`archivedRangeVisiblePost: true`,
-`footprintDropped: false`). This is a limitation of that oracle, not a product
-failure: it reads the per-row JSONL flag `context_bonsai_v2.archived`, but Claude
-Code's archived-filter hides follower rows via the marker file while leaving the
-original rows physically in the JSONL, and the post-prune JSONL also grows by the
-drive turn's verbatim tool_result echo. The authoritative behavioral/footprint
-evidence above is the load-bearing gate and is a clear PASS. `prune-effect` remains
-useful for synthetic fixtures but should be hardened to consult the marker file
-before it is trusted as a live oracle (tracked as harness debt).
+**Oracle correction (iteration 2):** the first iteration's `prune-effect`
+JSONL-diff oracle read a field the runtime never writes — a per-row
+`context_bonsai_v2.archived` flag — so it false-FAILed on every correct prune.
+The runtime actually records archival as a **top-level `message.archived` flag**
+on each archived user/assistant row (plus `archivedAt`/`archivedBy`), and persists
+the archived-UUID set to the **marker file `~/.claude/archived-<sessionId>.json`**
+(`addArchivedMarkerEntries`); only the anchor row carries `context_bonsai_v2`, and
+the placeholder summary carries `context_bonsai_v2.anchor_id`. Confirmed at
+`src/lib/compact.ts:278-280,307-309` (top-level flag) and `:86-113` (marker file).
+`prune-effect` now reads the top-level flag and the marker file, and scopes the
+footprint metric to the archived range's rows specifically (so the drive turn's
+appended verbatim tool_result echo can no longer inflate a whole-transcript count).
+
+Re-run against the retained live snapshots (no new model run) through the oracle's
+**own** verdict rule:
+
+```
+verdict: PASS
+archivedRangeVisiblePost: false
+placeholderPresentPost: true
+rangeVisibleCharsPre: 266  ->  rangeVisibleCharsPost: 0
+footprintDropped: true        (exit 0)
+```
+
+i.e. the archived range contributed 266 model-visible characters pre-prune and 0
+post-prune (hidden by the top-level flag + marker), automatically PASS. This agrees
+with the behavioral/token evidence above (≈9018-token model-visible prefix drop and
+the `NOT_IN_CONTEXT` recall).
 
 ### Scenario 3 — Protocol A secret oracle: PASS
 
@@ -164,24 +188,43 @@ kept only in a local /tmp file, never printed to logs/artifacts/commits).
   secret_in_output = true. secret-present-after-retrieve (model-visible) = true.
 - Non-destructive round-trip confirmed: prune hides the secret, retrieve restores it.
 
-**Harness-oracle note (honest):** `protocol-a-oracle` against the post-prune JSONL
-returned `valid: false` (secret in one non-archived row) for the same reason as
-above — it inspects per-row `archived` flags, not the marker file. The secret row
-is in fact within the archived range (1 of the 7 marker UUIDs) and is hidden from
-the model, as the `NOT_IN_CONTEXT` behavioral result proves. Same harness debt.
+**Oracle correction (iteration 2):** the first iteration's `protocol-a-oracle`
+read the same wrong field (`context_bonsai_v2.archived`) and so false-FAILed
+(`valid: false`) even though the secret row is archived. The corrected oracle reads
+the **top-level `message.archived` flag** and the **marker file**. The retained
+post-prune snapshot was captured right after the prune (before retrieve), and the
+secret-bearing user row `2e0b5975…` carries top-level `archived: true` there (one of
+the 7 archived range rows), so the oracle resolves it automatically — no marker
+needed (the live marker for this session was later cleared by the retrieve step).
+
+Re-run against the retained post-prune snapshot through the oracle's **own** rule:
+
+```
+valid: true
+verdict: PASS: secret appears only in archived original blocks
+occurrenceCount: 1   invalidOccurrenceCount: 0
+occurrence: { type: "user", archived: true, summary: false }   (exit 0)
+```
+
+This agrees with the behavioral result (`NOT_IN_CONTEXT` post-prune; secret restored
+only after retrieve).
 
 ## Verdict Summary
 
 | Scenario | Verdict | Grounding evidence |
 |---|---|---|
 | 1 prune-guard-live (direct launch, no `--resume`) | PASS | `/proc/<pid>/cmdline` argv0 = versioned path, no `--resume`; prune ALLOWED with real range `baa7ad00..8359d589` |
-| 2 content removal + footprint drop | PASS | marker lists the range; model-visible prefix 26704 → 17686 (≈9018-token drop); recall PRE = calculation, POST = `NOT_IN_CONTEXT` |
-| 3 Protocol A secret oracle | PASS | secret absent from prune patterns/summary/index (0/0); POST-prune recall = `NOT_IN_CONTEXT`; after retrieve recall = secret restored |
+| 2 content removal + footprint drop | PASS | `prune-effect` → `verdict: PASS` (rangeVisibleChars 266 → 0, footprintDropped); corroborated by model-visible prefix 26704 → 17686 (≈9018-token drop) and recall PRE = calculation, POST = `NOT_IN_CONTEXT` |
+| 3 Protocol A secret oracle | PASS | `protocol-a-oracle` → `valid: true`; secret absent from prune patterns/summary/index (0/0); POST-prune recall = `NOT_IN_CONTEXT`; after retrieve recall = secret restored |
 
-Offline harness oracles (`prune-effect`, `protocol-a-oracle`) false-FAILed on live
-data due to reading per-row JSONL flags instead of the marker file; recorded as
-harness debt. Verdicts above are taken from authoritative host-state/behavioral
-evidence per the e2e spec, never the tool's success string.
+The two offline oracles (`prune-effect`, `protocol-a-oracle`) now read archival
+from the **top-level `message.archived` flag** and the **marker file**
+(`~/.claude/archived-<sessionId>.json`) — NOT the per-row `context_bonsai_v2.archived`
+field the runtime never writes — so they PASS E2E-08 automatically through their own
+verdict rules against the retained live snapshots. The behavioral/host-state evidence
+remains the load-bearing authority and agrees with the oracle verdicts; verdicts are
+never taken from the tool's success string. The earlier iteration's notes describing
+these oracles as false-FAILing have been superseded by this fix.
 
 ## Artifacts (local only — not committed)
 
