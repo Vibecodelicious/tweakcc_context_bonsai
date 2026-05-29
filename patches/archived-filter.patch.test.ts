@@ -128,6 +128,16 @@ describe('injected archived UUID filter', () => {
     await writeFile(markerPath, JSON.stringify({ archived: ['not-an-array'] }));
     expect(visibilityPredicate([message('non-array-marker')])).toEqual([{ role: 'user', content: 'visible content' }]);
   });
+
+  test('reads the marker through a strict host-wrapper fs that requires an encoding argument', async () => {
+    const configDir = await makeTempDir();
+    await writeFile(join(configDir, `archived-${sessionId}.json`), JSON.stringify(['archived-message']));
+    const visibilityPredicate = buildPatchedVisibilityPredicateWithWrapperFs(configDir);
+
+    expect(visibilityPredicate([message('archived-message', 'archived'), message('active-message', 'active')])).toEqual([
+      { role: 'user', content: 'active' },
+    ]);
+  });
 });
 
 async function fixtureBundle(visibilityFixtureName: string): Promise<string> {
@@ -143,6 +153,34 @@ function buildPatchedVisibilityPredicate(configDir: string): (messages: Array<{ 
   const source = archivedFilterPatch.apply(testRuntimeBundle(), fakePatchContext());
   const factory = new Function('__fs', '__configDir', 'Z9', `${source};return providerMap;`);
   return factory(nodeFs, configDir, { sessionId }) as (messages: Array<{ type: string; uuid: string; message: { content: string } }>) => unknown;
+}
+
+// Mirrors the Claude Code host fs wrapper: readFileSync dereferences options.encoding,
+// so a call with no second argument throws (the live-binary failure mode this story fixes).
+// A real, separate stub on purpose — __fixtures__/runtime-helpers.fixture.js is wired only
+// into the anchor/fail-closed tests and is not exercised by the injected-filter predicate.
+function createWrapperFs(): {
+  existsSync: (path: string) => boolean;
+  writeFileSync: (path: string, data: unknown) => void;
+  readFileSync: (path: string, options?: { encoding?: BufferEncoding } | BufferEncoding) => string | Buffer;
+} {
+  return {
+    existsSync: () => false,
+    writeFileSync: () => {},
+    readFileSync: (path, options) => {
+      const encoding = typeof options === 'string' ? options : options?.encoding;
+      if (encoding === undefined) {
+        throw new TypeError("undefined is not an object (evaluating 'options.encoding')");
+      }
+      return nodeFs.readFileSync(path, encoding);
+    },
+  };
+}
+
+function buildPatchedVisibilityPredicateWithWrapperFs(configDir: string): (messages: Array<{ type: string; uuid: string; message: { content: string } }>) => unknown {
+  const source = archivedFilterPatch.apply(testRuntimeBundle(), fakePatchContext());
+  const factory = new Function('__fs', '__configDir', 'Z9', `${source};return providerMap;`);
+  return factory(createWrapperFs(), configDir, { sessionId }) as (messages: Array<{ type: string; uuid: string; message: { content: string } }>) => unknown;
 }
 
 function testRuntimeBundle(): string {
