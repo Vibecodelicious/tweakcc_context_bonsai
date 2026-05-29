@@ -32,6 +32,7 @@ Per the cross-agent template at `docs/context-bonsai-e2e-template.md`:
 | E2E-05 | Compatibility error path | Missing JSONL or schema-mismatch produces a deterministic compatibility error; no mutation |
 | E2E-06 | Persistence across resume | Archived state survives `claude --resume <session-id>`; the optional tweakcc `archivedFilter` patch hides the archived range from the live transcript view |
 | E2E-07 | Secret prune oracle | After prune, model cannot reveal the pruned secret from active context alone |
+| E2E-08 | Bug-shape prune guard (direct versioned-path launch, no `--resume`) | The native binary launched directly by its versioned path with no `--resume` allows a prune; the archived range is actually removed from the model-visible transcript (content removal + input-token-footprint drop), and retrieve restores it. Pre-fix code reproduces the success-shaped refusal that archives nothing |
 
 ## Pre-Flight
 
@@ -404,6 +405,91 @@ Look for:
 
 **Reason codes:** `secret-pruned`, `secret-leaked`, `oracle-passed`, `oracle-failed`.
 
+### E2E-08 — Bug-shape prune guard: direct versioned-path launch, no `--resume`
+
+**Goal:** reproduce the launch shape the maintainer actually runs — the native
+version-named binary invoked directly by its path (`argv[0] = ~/.local/share/claude/versions/<v>`)
+with **no `--resume`** — and prove that a prune is *allowed* and *actually removes*
+the archived range from the model-visible transcript, not merely reported removed
+by the tool's success string. This is NET-NEW capability: E2E-00..07 and the rest
+of this protocol launch via the `claude` shim / `sprite exec`; none assert the
+direct versioned-path shape that triggers the guard's false-refusal.
+
+**Why this shape matters:** the pre-fix patch guard collected executable
+candidates only after an ancestor passed a `--resume`/argv-name gate. A directly
+launched version-named binary passes neither, so the guard found zero candidates
+and refused the prune — while returning a success-shaped result (no `isError`).
+The fix identifies the running binary by each ancestor's `/proc/<pid>/exe` link,
+independent of launch shape, and surfaces refusals with `isError: true`.
+
+**Pre-flight specific to this scenario:**
+
+```bash
+# The patched native binary under test (adjust version as pinned).
+BIN="$HOME/.local/share/claude/versions/2.1.143-cbfix"
+# Confirm the sentinel is embedded in the binary that will run.
+grep -a -c '/\*cb:archived-filter:v1\*/' "$BIN"   # expect >= 1
+```
+
+**Execution:**
+
+1. In a scratch project, drive ~10 turns establishing unique boundary phrases
+   (`ALPHA-PHRASE-001 ... OMEGA-PHRASE-001`) exactly as in E2E-01. Capture the
+   pre-prune session JSONL: `cp "$SESSION_FILE" pre.jsonl`.
+2. Launch the bug-shape run with the harness, which spawns the binary DIRECTLY
+   (`argv0 = $BIN`, no `--resume`), asserts the launch shape from
+   `/proc/<claude-pid>/cmdline`, and drives the prune:
+
+   ```bash
+   cd /path/to/tweakcc_context_bonsai
+   bun run e2e/native-e2e.ts prune-guard-live \
+     --binary "$BIN" \
+     --prompt 'Use context-bonsai-prune to archive ALPHA-PHRASE-001..OMEGA-PHRASE-001 with a meaningful summary and index terms; report the anchor id. Do not retrieve in the same step.' \
+     --out /tmp/cc-bonsai-e2e/<run>/E2E-08-launch.json
+   ```
+
+   The harness output records `launchShape.bugShapeConfirmed` (argv[0] is the
+   versioned path AND no `--resume`). A run that launches via the `claude` shim
+   does NOT satisfy this scenario.
+3. After the prune completes, capture the post-prune session JSONL
+   (`cp "$SESSION_FILE" post.jsonl`) and verify the *effect* — content removal
+   plus a model-visible footprint drop — from session state:
+
+   ```bash
+   bun run e2e/native-e2e.ts prune-effect \
+     --pre-session pre.jsonl --session post.jsonl \
+     --from-uuid <anchor-uuid> --to-uuid <range-end-uuid> \
+     --out /tmp/cc-bonsai-e2e/<run>/E2E-08-effect.json
+   ```
+
+4. Retrieve the anchor (per E2E-03) and confirm the range is visible again.
+5. **Pre-fix reproduction:** with the un-patched / pre-fix MCP server, run the
+   same prune; observe the success-shaped refusal (tool reports success, no
+   `isError`) and that `prune-effect` returns `FAIL` (`archivedRangeVisiblePost: true`,
+   `footprintDropped: false`).
+
+**Evidence collection:** `E2E-08-launch.json` (launch shape + verdict),
+`E2E-08-effect.json` (content-removal + footprint analysis), and the pre/post
+session JSONL excerpts (no secrets, no full transcripts).
+
+**Verdict rules:**
+
+- `PASS`: launch shape confirmed (versioned path, no `--resume`), `prune-effect`
+  reports `PASS` (archived range hidden, placeholder present, footprint dropped),
+  retrieve restores the range, and the pre-fix run reproduces the failure.
+- `BLOCKED`: provider credentials unavailable for the live model drive, native
+  binary missing, or session JSONL unavailable. The harness classifies the
+  credential-less drive as `BLOCKED` (reason code `credentials-missing-in-harness`),
+  not `FAIL`; the launch-shape assertion and the offline `prune-effect` analysis
+  still run.
+- `FAIL`: tool reports prune success but `prune-effect` shows the range still
+  visible / no footprint drop, or the launch shape was not the direct versioned
+  path, or a refusal is returned without `isError`.
+
+**Reason codes:** `prune-guard-live-pass`, `bug-shape-confirmed`,
+`credentials-missing-in-harness`, `native-runtime-missing`, `live-run-nonzero-exit`,
+`content-not-removed`, `footprint-not-dropped`, `refusal-not-iserror`.
+
 ## Pinned-Target Artifact Evidence
 
 Before a release-gate PASS, produce or refresh the evidence record for Claude Code native `2.1.143` Linux x64. The canonical artifact input is:
@@ -428,7 +514,7 @@ Verdict rules:
 
 ## Pass Criteria For A Parity Claim
 
-Do not claim broad Context Bonsai parity for Claude Code unless E2E-00, E2E-01, E2E-02, E2E-03, E2E-05, E2E-06, E2E-07, and pinned-target artifact evidence all PASS.
+Do not claim broad Context Bonsai parity for Claude Code unless E2E-00, E2E-01, E2E-02, E2E-03, E2E-05, E2E-06, E2E-07, E2E-08, and pinned-target artifact evidence all PASS.
 
 E2E-04 must PASS for native full parity because the tweakcc gauge patch is part of the integrated system.
 

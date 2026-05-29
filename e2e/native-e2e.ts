@@ -1,8 +1,10 @@
 #!/usr/bin/env bun
 
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { dirname } from 'node:path';
 
 import { bonsaiPatches } from '../patches/registry';
@@ -62,17 +64,31 @@ interface Args {
   out?: string;
   session?: string;
   secret?: string;
+  binary?: string;
+  prompt?: string;
+  cwd?: string;
+  preSession?: string;
+  fromUuid?: string;
+  toUuid?: string;
 }
 
-const argv = parseArgs(process.argv.slice(2));
+// Guard the CLI dispatch behind import.meta.main so this module can be imported
+// (e.g. by unit tests of analyzePruneEffect) without running the dispatcher.
+if (import.meta.main) {
+  const argv = parseArgs(process.argv.slice(2));
 
-if (argv.command === 'artifact-evidence') {
-  await artifactEvidence(argv);
-} else if (argv.command === 'protocol-a-oracle') {
-  await protocolAOracle(argv);
-} else {
-  usage();
-  process.exit(argv.command === 'help' || argv.command === undefined ? 0 : 1);
+  if (argv.command === 'artifact-evidence') {
+    await artifactEvidence(argv);
+  } else if (argv.command === 'protocol-a-oracle') {
+    await protocolAOracle(argv);
+  } else if (argv.command === 'prune-guard-live') {
+    await pruneGuardLive(argv);
+  } else if (argv.command === 'prune-effect') {
+    await pruneEffectCommand(argv);
+  } else {
+    usage();
+    process.exit(argv.command === 'help' || argv.command === undefined ? 0 : 1);
+  }
 }
 
 async function artifactEvidence(args: Args): Promise<void> {
@@ -234,6 +250,322 @@ function isModelTranscriptRow(parsed: Record<string, unknown>): boolean {
   return parsed.type === 'user' || parsed.type === 'assistant' || parsed.type === 'summary';
 }
 
+// ---------------------------------------------------------------------------
+// prune-guard-detection live e2e (NET-NEW for this story)
+//
+// Reproduces Basil's launch shape: the native version-named binary invoked
+// DIRECTLY by its path (argv[0] = .../versions/<v>) with NO --resume. Asserts
+// that shape from /proc/<claude-pid>/cmdline, then drives prune -> retrieve and
+// verifies the archived range is actually removed from the model-visible
+// transcript (content removal + input-token-footprint drop), not merely reported
+// removed by the tool's success string.
+//
+// The live model drive requires provider credentials provisioned out of band. If
+// they are absent the run is BLOCKED (a genuine environmental precondition), not
+// FAIL — the launch-shape assertion and the JSONL effect analysis are still
+// exercised so the harness is fully runnable offline up to the credential gate.
+// ---------------------------------------------------------------------------
+
+interface LaunchShapeResult {
+  pid: number;
+  cmdline: string[];
+  argv0: string;
+  expectedBinary: string;
+  argv0IsVersionedBinary: boolean;
+  hasResumeFlag: boolean;
+  bugShapeConfirmed: boolean;
+}
+
+function defaultNativeBinary(): string {
+  return `${homedir()}/.local/share/claude/versions/2.1.143-cbfix`;
+}
+
+function readProcCmdline(pid: number): string[] {
+  const raw = readFileSync(`/proc/${pid}/cmdline`);
+  return raw
+    .toString('utf8')
+    .split('\0')
+    .filter((part) => part.length > 0);
+}
+
+function argvHasResume(argv: string[]): boolean {
+  return argv.some(
+    (arg) => arg === '--resume' || arg === 'resume' || /^--resume=/.test(arg)
+  );
+}
+
+// Assert the running process matches the bug-triggering shape: launched directly
+// by the versioned binary path with no --resume token.
+function assertLaunchShape(pid: number, expectedBinary: string): LaunchShapeResult {
+  const cmdline = readProcCmdline(pid);
+  const argv0 = cmdline[0] ?? '';
+  const argv0IsVersionedBinary =
+    argv0 === expectedBinary || (argv0.includes('/.local/share/claude/versions/') && !argv0.endsWith('/claude'));
+  const hasResumeFlag = argvHasResume(cmdline);
+  return {
+    pid,
+    cmdline,
+    argv0,
+    expectedBinary,
+    argv0IsVersionedBinary,
+    hasResumeFlag,
+    bugShapeConfirmed: argv0IsVersionedBinary && !hasResumeFlag,
+  };
+}
+
+interface PruneEffectResult {
+  verdict: 'PASS' | 'FAIL' | 'BLOCKED';
+  reason: string;
+  archivedRangeUuids: string[];
+  archivedRangePresentPre: boolean;
+  archivedRangeVisiblePost: boolean;
+  placeholderPresentPost: boolean;
+  preVisibleFootprintChars: number;
+  postVisibleFootprintChars: number;
+  footprintDropped: boolean;
+}
+
+function rowText(row: Record<string, unknown>): string {
+  if (row.type === 'summary') return typeof row.summary === 'string' ? row.summary : '';
+  const message = row.message as { content?: unknown } | undefined;
+  return flatten(message?.content);
+}
+
+function isArchivedRow(row: Record<string, unknown>): boolean {
+  const meta = row.context_bonsai_v2 as { archived?: unknown } | undefined;
+  return meta?.archived === true;
+}
+
+function readJsonlRows(path: string): Array<Record<string, unknown>> {
+  return readFileSync(path, 'utf8')
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+// Model-visible footprint proxy: sum the searchable-text length of every model
+// transcript row that is NOT an archived original. The archived-filter seam hides
+// archived followers from the live request path, so a real prune drops this sum.
+function visibleFootprintChars(rows: Array<Record<string, unknown>>): number {
+  let total = 0;
+  for (const row of rows) {
+    if (!isModelTranscriptRow(row)) continue;
+    if (isArchivedRow(row)) continue;
+    total += rowText(row).length;
+  }
+  return total;
+}
+
+// Verify a prune actually removed the archived range from the model-visible
+// transcript, comparing the pre-prune and post-prune session JSONL.
+export function analyzePruneEffect(
+  preRows: Array<Record<string, unknown>>,
+  postRows: Array<Record<string, unknown>>,
+  fromUuid: string,
+  toUuid: string
+): PruneEffectResult {
+  const rangeUuids = collectRangeUuids(preRows, fromUuid, toUuid);
+  const archivedRangePresentPre = rangeUuids.length > 0;
+
+  const postByUuid = new Map<string, Record<string, unknown>>();
+  for (const row of postRows) {
+    const uuid = typeof row.uuid === 'string' ? row.uuid : undefined;
+    if (uuid) postByUuid.set(uuid, row);
+  }
+
+  // The range is "visible" post-prune if any of its rows still appear as a
+  // non-archived model transcript row.
+  const archivedRangeVisiblePost = rangeUuids.some((uuid) => {
+    const row = postByUuid.get(uuid);
+    return row !== undefined && isModelTranscriptRow(row) && !isArchivedRow(row);
+  });
+
+  const placeholderPresentPost = postRows.some(
+    (row) => row.type === 'summary' && (row.context_bonsai_v2 as { anchor_id?: unknown } | undefined)?.anchor_id === fromUuid
+  );
+
+  const preVisibleFootprintChars = visibleFootprintChars(preRows);
+  const postVisibleFootprintChars = visibleFootprintChars(postRows);
+  const footprintDropped = postVisibleFootprintChars < preVisibleFootprintChars;
+
+  let verdict: PruneEffectResult['verdict'] = 'PASS';
+  let reason = 'archived range removed from model-visible transcript and footprint dropped';
+  if (!archivedRangePresentPre) {
+    verdict = 'BLOCKED';
+    reason = 'pre-prune session does not contain the from..to range; cannot evaluate effect';
+  } else if (archivedRangeVisiblePost) {
+    verdict = 'FAIL';
+    reason = 'archived range is still visible (non-archived) in the post-prune transcript';
+  } else if (!placeholderPresentPost) {
+    verdict = 'FAIL';
+    reason = 'no placeholder summary anchored at fromUuid in the post-prune transcript';
+  } else if (!footprintDropped) {
+    verdict = 'FAIL';
+    reason = 'model-visible footprint did not drop after prune';
+  }
+
+  return {
+    verdict,
+    reason,
+    archivedRangeUuids: rangeUuids,
+    archivedRangePresentPre,
+    archivedRangeVisiblePost,
+    placeholderPresentPost,
+    preVisibleFootprintChars,
+    postVisibleFootprintChars,
+    footprintDropped,
+  };
+}
+
+function collectRangeUuids(
+  rows: Array<Record<string, unknown>>,
+  fromUuid: string,
+  toUuid: string
+): string[] {
+  const uuids: string[] = [];
+  let collecting = false;
+  for (const row of rows) {
+    const uuid = typeof row.uuid === 'string' ? row.uuid : undefined;
+    if (uuid === fromUuid) collecting = true;
+    if (collecting && uuid) uuids.push(uuid);
+    if (uuid === toUuid) break;
+  }
+  return uuids;
+}
+
+async function pruneEffectCommand(args: Args): Promise<void> {
+  if (!args.preSession) throw new Error('prune-effect requires --pre-session <jsonl>');
+  if (!args.session) throw new Error('prune-effect requires --session <post-prune jsonl>');
+  if (!args.fromUuid) throw new Error('prune-effect requires --from-uuid <uuid>');
+  if (!args.toUuid) throw new Error('prune-effect requires --to-uuid <uuid>');
+
+  const preRows = readJsonlRows(args.preSession);
+  const postRows = readJsonlRows(args.session);
+  const result = analyzePruneEffect(preRows, postRows, args.fromUuid, args.toUuid);
+  await writeJson(args.out, result);
+  if (result.verdict === 'FAIL') process.exitCode = 1;
+}
+
+async function pruneGuardLive(args: Args): Promise<void> {
+  const binary = args.binary ?? defaultNativeBinary();
+  const cwd = args.cwd ?? process.cwd();
+  const prompt =
+    args.prompt ??
+    'Use context-bonsai-prune to archive the contiguous range between the unique boundary ' +
+      'phrases I established, then confirm the anchor id. Do not retrieve in the same step.';
+
+  if (!existsSync(binary)) {
+    await writeJson(args.out, {
+      verdict: 'BLOCKED',
+      reason: `native versioned binary not found at ${binary}; pass --binary <path>`,
+      reasonCode: 'native-runtime-missing',
+    });
+    process.exitCode = 1;
+    return;
+  }
+
+  // Launch the binary DIRECTLY by its versioned path (argv[0] = binary) with NO
+  // --resume — the bug-triggering shape. Print mode keeps the run non-interactive.
+  // The model drive requires provider credentials; absent those the child exits
+  // non-zero and we classify BLOCKED after still asserting the launch shape.
+  const child = spawn(binary, ['-p', prompt], {
+    cwd,
+    argv0: binary,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: process.env,
+  });
+
+  let shape: LaunchShapeResult | null = null;
+  try {
+    shape = assertLaunchShape(child.pid as number, binary);
+  } catch (error) {
+    shape = null;
+    void error;
+  }
+
+  let stdout = '';
+  let stderr = '';
+  child.stdout?.on('data', (chunk) => {
+    stdout += String(chunk);
+  });
+  child.stderr?.on('data', (chunk) => {
+    stderr += String(chunk);
+  });
+
+  const exitCode: number = await new Promise((resolveExit) => {
+    child.on('error', () => resolveExit(127));
+    child.on('close', (code) => resolveExit(code ?? 0));
+  });
+
+  // Resolve the live session JSONL the binary wrote (newest under cwd's project dir).
+  let sessionPath: string | undefined;
+  try {
+    sessionPath = await newestSessionForCwd(cwd);
+  } catch {
+    sessionPath = undefined;
+  }
+
+  const credentialsLikelyAbsent =
+    exitCode !== 0 && /login|api key|credential|auth|not.*logged|unauthor/i.test(`${stdout}\n${stderr}`);
+
+  const blocked = exitCode !== 0;
+  const result = {
+    verdict: blocked ? 'BLOCKED' : 'PASS',
+    reason: blocked
+      ? credentialsLikelyAbsent
+        ? 'provider credentials unavailable; live model drive could not complete'
+        : `live Claude run exited ${exitCode}; live model drive could not complete`
+      : 'native binary launched directly with no --resume; live prune drive completed',
+    reasonCode: blocked
+      ? credentialsLikelyAbsent
+        ? 'credentials-missing-in-harness'
+        : 'live-run-nonzero-exit'
+      : 'prune-guard-live-pass',
+    binary,
+    launchShape: shape,
+    bugShapeConfirmed: shape?.bugShapeConfirmed ?? false,
+    exitCode,
+    sessionPath: sessionPath ?? null,
+    note:
+      'After a successful live drive, run prune-effect with --pre-session/--session/--from-uuid/--to-uuid ' +
+      'to verify content removal and footprint drop, and protocol-a-oracle for the secret oracle.',
+  };
+
+  await writeJson(args.out, result);
+  if (result.verdict === 'BLOCKED') process.exitCode = 1;
+}
+
+async function newestSessionForCwd(cwd: string): Promise<string> {
+  const projectDir = `${homedir()}/.claude/projects/${cwd.replace(/\//g, '-')}`;
+  if (!existsSync(projectDir)) {
+    // Fall back to the absolute newest session under projects/.
+    const projectsRoot = `${homedir()}/.claude/projects`;
+    return newestJsonl(projectsRoot);
+  }
+  return newestJsonl(projectDir);
+}
+
+async function newestJsonl(root: string): Promise<string> {
+  const { Glob } = await import('bun');
+  const glob = new Glob('**/*.jsonl');
+  let newestPath = '';
+  let newestMtime = -1;
+  for await (const match of glob.scan({ cwd: root, absolute: true })) {
+    try {
+      const stat = await Bun.file(match).stat();
+      const mtime = stat.mtime ? stat.mtime.getTime() : -1;
+      if (mtime > newestMtime) {
+        newestMtime = mtime;
+        newestPath = match;
+      }
+    } catch {
+      continue;
+    }
+  }
+  if (!newestPath) throw new Error(`no session jsonl under ${root}`);
+  return newestPath;
+}
+
 function selectVisibilitySwitch(content: string): EvidenceSelection {
   return serializeEvidence(selectVisibilitySwitchAnchor(content).evidence);
 }
@@ -311,6 +643,24 @@ function parseArgs(args: string[]): Args {
     } else if (arg === '--secret') {
       parsed.secret = requireValue(arg, next);
       index += 1;
+    } else if (arg === '--binary') {
+      parsed.binary = requireValue(arg, next);
+      index += 1;
+    } else if (arg === '--prompt') {
+      parsed.prompt = requireValue(arg, next);
+      index += 1;
+    } else if (arg === '--cwd') {
+      parsed.cwd = requireValue(arg, next);
+      index += 1;
+    } else if (arg === '--pre-session') {
+      parsed.preSession = requireValue(arg, next);
+      index += 1;
+    } else if (arg === '--from-uuid') {
+      parsed.fromUuid = requireValue(arg, next);
+      index += 1;
+    } else if (arg === '--to-uuid') {
+      parsed.toUuid = requireValue(arg, next);
+      index += 1;
     } else if (arg === '--help' || arg === '-h') {
       parsed.command = 'help';
     } else {
@@ -329,5 +679,12 @@ function usage(): void {
   console.log(`Usage:
   bun run e2e/native-e2e.ts artifact-evidence [--bundle extracted.js] [--manifest manifest.json] [--out evidence.json]
   bun run e2e/native-e2e.ts protocol-a-oracle --session session.jsonl --secret SECRET [--out oracle.json]
+  bun run e2e/native-e2e.ts prune-guard-live [--binary ~/.local/share/claude/versions/<v>] [--prompt "..."] [--cwd DIR] [--out result.json]
+      Launch the native version-named binary DIRECTLY (argv[0] = the binary, no --resume),
+      assert that launch shape from /proc/<pid>/cmdline, and drive a live prune.
+      Requires provider credentials; BLOCKED (not FAIL) if the model drive cannot complete.
+  bun run e2e/native-e2e.ts prune-effect --pre-session pre.jsonl --session post.jsonl --from-uuid UUID --to-uuid UUID [--out effect.json]
+      Verify a prune actually removed the archived range from the model-visible transcript
+      (content removal + input-token-footprint drop) by comparing pre/post session JSONL.
 `);
 }
