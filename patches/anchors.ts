@@ -8,9 +8,26 @@ import { BonsaiPatchError } from './types';
 
 const identifier = String.raw`[$A-Z_a-z][$\w]*`;
 
+// The provider-bound transcript map turns Claude Code session entries into
+// Anthropic API message objects. It is identified structurally, not by a
+// bundle-specific minified converter name: a `.map((msg,idx)=>{...})` whose body
+// branches `if(msg.type==="user")return <userConverter>(...)`, handles
+// `api_system` as `{role:"system",...}`, and falls through to a DISTINCT
+// `<assistantConverter>(...)`. The minified converter identifiers drift between
+// releases (2.1.143 `Bp5`/`pp5`; 2.1.156 `hLz`/`SLz`), so they are captured, not
+// hard-coded. Two shapes are supported because the host expression differs by
+// release: 2.1.143 binds the map to a local (`let D=H.map(...)`) while 2.1.156
+// returns it as the second arm of a comma-sequence right after the
+// `tengu_api_cache_breakpoints` cache-breakpoint telemetry call
+// (`return d("tengu_api_cache_breakpoints",{...}),H.map(...)`). Both inject the
+// archived-range filter before the captured map variable is consumed.
 const visibilitySwitchPatterns = [
   new RegExp(
-    String.raw`let\s+${identifier}\s*=\s*(${identifier})\.map\s*\(\s*\([^)]*\)\s*=>\s*\{(?=[\s\S]{0,900}\bBp5\s*\()(?=[\s\S]{0,900}\bpp5\s*\()[\s\S]{0,900}?return\s+pp5\s*\(`,
+    String.raw`return\s+${identifier}\s*\(\s*["']tengu_api_cache_breakpoints["'][\s\S]{0,400}?\)\s*,\s*(${identifier})\.map\s*\(\s*\(\s*${identifier}\s*(?:,\s*${identifier}\s*)?\)\s*=>\s*\{[\s\S]{0,160}?if\s*\(\s*${identifier}\.type\s*===\s*["']user["']\s*\)\s*return\s+(${identifier})\s*\([\s\S]{0,200}?api_system["'][\s\S]{0,140}?return\s+(${identifier})\s*\(`,
+    'g'
+  ),
+  new RegExp(
+    String.raw`let\s+${identifier}\s*=\s*(${identifier})\.map\s*\(\s*\(\s*${identifier}\s*(?:,\s*${identifier}\s*)?\)\s*=>\s*\{[\s\S]{0,160}?if\s*\(\s*${identifier}\.type\s*===\s*["']user["']\s*\)\s*return\s+(${identifier})\s*\([\s\S]{0,200}?api_system["'][\s\S]{0,140}?return\s+(${identifier})\s*\(`,
     'g'
   ),
 ];
@@ -87,7 +104,9 @@ export function selectVisibilitySwitchAnchor(content: string): VisibilitySwitchA
     minScore: 30,
     minMargin: 10,
   });
-  const messageVar = new RegExp(String.raw`let\s+${identifier}\s*=\s*(${identifier})\.map`).exec(evidence.selected.text)?.[1];
+  const messageVar =
+    new RegExp(String.raw`let\s+${identifier}\s*=\s*(${identifier})\.map`).exec(evidence.selected.text)?.[1] ??
+    new RegExp(String.raw`\)\s*,\s*(${identifier})\.map`).exec(evidence.selected.text)?.[1];
   if (!messageVar) throw new BonsaiPatchError('archived-filter', 'selected provider message map did not expose a messages variable');
   return { ...evidence.selected, messageVar, evidence };
 }
@@ -146,9 +165,24 @@ function visibilitySwitchScorer(content: string, candidate: Candidate): number {
   let score = 0;
   if (/\.map\s*\(/.test(candidate.text)) score += 10;
   if (/\.type\s*===\s*["']user["']/.test(candidate.text)) score += 15;
-  if (/\bBp5\s*\(/.test(candidate.text)) score += 20;
-  if (/\bpp5\s*\(/.test(candidate.text)) score += 20;
+  // The provider-bound seam routes `api_system` entries to `{role:"system",...}`
+  // and is preceded by the `tengu_api_cache_breakpoints` cache-breakpoint
+  // telemetry call. These two signals, plus two DISTINCT converter calls (the
+  // user-branch converter and the else/assistant converter), replace the prior
+  // bundle-specific `Bp5`/`pp5` literals so the anchor tracks behavior across
+  // releases rather than a single bundle's minified names.
+  if (/\.type\s*===\s*["']api_system["']/.test(candidate.text)) score += 15;
+  if (/tengu_api_cache_breakpoints/.test(candidate.text)) score += 20;
+  if (/\brole\s*:\s*["']system["']/.test(candidate.text)) score += 10;
   if (/\brole\s*===\s*["']user["']/.test(candidate.text)) score += 10;
+
+  const userConverter = new RegExp(
+    String.raw`\.type\s*===\s*["']user["']\s*\)\s*return\s+(${identifier})\s*\(`
+  ).exec(candidate.text)?.[1];
+  const elseConverter = new RegExp(
+    String.raw`api_system["'][\s\S]{0,140}?return\s+(${identifier})\s*\(`
+  ).exec(candidate.text)?.[1];
+  if (userConverter && elseConverter && userConverter !== elseConverter) score += 20;
 
   const before = content.slice(Math.max(0, candidate.index - 160), candidate.index);
   const after = content.slice(candidate.index, candidate.index + 1800);
@@ -173,6 +207,15 @@ function messageConverterScorer(content: string, candidate: Candidate): number {
   if (/\b(?:id|uuid)\s*:\s*\w+\.uuid\b/.test(candidate.text)) score += 10;
   if (/\bmetadata\s*:\s*\{\s*uuid\b/.test(candidate.text)) score += 10;
   if (/typeof\s+\w+\.message\.content\s*===\s*["']string["']/.test(candidate.text)) score += 10;
+  // The provider-bound user/assistant converters share a 4-arg signature whose
+  // second parameter is the cache-breakpoint boolean default (2.1.143
+  // `Bp5(H,$=!1,q,K)`; 2.1.156 `hLz(H,$=!1,q,K)`). Content-sanitizer helpers the
+  // greedy match can spill into (e.g. 2.1.156 `I69(H)`) are single-argument and
+  // never carry that flag, so this signature discriminates the real converter
+  // without weakening minScore/minMargin.
+  if (new RegExp(String.raw`^function\s+${identifier}\s*\(\s*${identifier}\s*,\s*${identifier}\s*=\s*!1`).test(candidate.text)) {
+    score += 20;
+  }
   const after = content.slice(candidate.index, candidate.index + 700);
   if (/\bcache_control\b/.test(after) && /\bttl\b/.test(after)) score += 15;
   if (/\brole\s*:\s*["']system["']/.test(candidate.text)) score -= 25;

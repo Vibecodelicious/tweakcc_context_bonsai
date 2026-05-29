@@ -58,6 +58,37 @@ describe('archived-filter patch application', () => {
     expect(patched).toContain('function providerMap(messages,cache,ttl){d("tengu_api_cache_breakpoints",{});/*cb:archived-filter:v1*/{');
   });
 
+  // 2.1.156 returns the provider map as the second arm of a comma-sequence right
+  // after the cache-breakpoint telemetry call (`return d("tengu_api_cache_breakpoints",{...}),H.map(...)`)
+  // rather than binding it to a local `let D=...`. The filter block must be injected
+  // before that `return` so the captured map variable is filtered before it is mapped.
+  test('selects the 2.1.156 comma-sequence return provider map and injects before the return', () => {
+    const content = testRuntimeBundle2156();
+    const patched = archivedFilterPatch.apply(content, fakePatchContext());
+
+    expect(countOccurrences(patched, archivedFilterPatch.sentinel)).toBe(1);
+    // The filter block is injected immediately before the `return d("tengu...",...),H.map(...)`
+    // statement, so the captured map variable H is filtered before it is mapped.
+    expect(patched).toMatch(/\/\*cb:archived-filter:v1\*\/\{[\s\S]*H=H\.filter\([\s\S]*\}return d\("tengu_api_cache_breakpoints",\{\}\),H\.map\(/);
+  });
+
+  test('the injected 2.1.156 filter actually removes archived UUIDs when executed', async () => {
+    const configDir = await makeTempDir();
+    await writeFile(join(configDir, `archived-${sessionId}.json`), JSON.stringify(['archived-message']));
+
+    const source = archivedFilterPatch.apply(testRuntimeBundle2156(), fakePatchContext());
+    const factory = new Function('__fs', '__configDir', 'Z9', `${source};return providerMap;`);
+    const providerMap = factory(nodeFs, configDir, { sessionId }) as (
+      messages: Array<{ type: string; uuid: string; message: { content: string } }>,
+      cache: boolean,
+      ttl: string
+    ) => unknown;
+
+    expect(providerMap([message('archived-message', 'archived'), message('active-message', 'active')], false, '5m')).toEqual([
+      { role: 'user', content: 'active' },
+    ]);
+  });
+
   test('fails closed with BonsaiPatchError when the anchor is absent', async () => {
     const content = await fixtureBundle('runtime-helpers.fixture.js');
 
@@ -195,6 +226,25 @@ function Bp5(X){return {role:"user", content:X.message.content}}
 function pp5(X){return {role:"assistant", content:X.message.content}}
 function d(){}
 function providerMap(messages,cache,ttl){d("tengu_api_cache_breakpoints",{});let D=messages.map((X,L)=>{let P=L===0;if(X.type==="user")return Bp5(X,P,cache,ttl);if(X.type==="api_system")return{role:"system",content:X.message.content};return pp5(X,P,cache,ttl)});if(cache){D[0].content=[{type:"text",text:"x",cache_control:{ttl}}]}return D}
+`;
+}
+
+// 2.1.156-shaped runtime: the provider map is returned as the second arm of a
+// comma sequence after the `tengu_api_cache_breakpoints` telemetry call, and the
+// user/assistant converters use the 4-arg `(H,$=!1,q,K)` signature. Mirrors the
+// real bundle structure the visibility-switch anchor's first alternation targets.
+function testRuntimeBundle2156(): string {
+  return `
+function A1(){return __fs}
+function C2(){return __configDir}
+function S3(){return Z9.sessionId}
+function J0(a,b){return String(a).replace(/\\/+$/,'')+'/'+b}
+if(A1().existsSync(J0(C2(),"history.jsonl"))){A1().readFileSync(J0(C2(),"history.jsonl"))}
+A1().writeFileSync(J0(C2(),"todos"),"[]")
+function hLz(H,$=!1,q,K){return {role:"user", content:H.message.content}}
+function SLz(H,$=!1,q,K){return {role:"assistant", content:H.message.content}}
+function d(){}
+function providerMap(H,cache,ttl){let Y=new Set;return d("tengu_api_cache_breakpoints",{}),H.map((M,j)=>{let w=Y.has(j);if(M.type==="user")return hLz(M,w,cache,ttl);if(M.type==="api_system")return{role:"system",content:M.message.content};return SLz(M,w,cache,ttl)})}
 `;
 }
 

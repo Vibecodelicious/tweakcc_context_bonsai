@@ -18,9 +18,9 @@ import {
 } from '../patches/anchors';
 import { composePatches, verifyPatchSentinels } from '../apply/apply-bonsai';
 
-const defaultBundlePath = '.artifacts/claude-code/2.1.143/linux-x64/extracted.js';
-const defaultManifestPath = '.artifacts/claude-code/2.1.143/linux-x64/manifest.json';
-const semanticReportPath = 'docs/semantic-anchor-analysis-2.1.143.md';
+const defaultBundlePath = '.artifacts/claude-code/2.1.156/linux-x64/extracted.js';
+const defaultManifestPath = '.artifacts/claude-code/2.1.156/linux-x64/manifest.json';
+const semanticReportPath = 'docs/semantic-anchor-analysis-2.1.156.md';
 const targetBundleEnv = 'CB_CLAUDE_TARGET_BUNDLE_JS';
 
 const requiredSemanticSections = [
@@ -98,7 +98,7 @@ async function artifactEvidence(args: Args): Promise<void> {
   if (!existsSync(bundlePath)) {
     throw new Error(
       `missing target bundle: expected ${bundlePath} or set ${targetBundleEnv}; ` +
-        'do not claim release-gate PASS without the native Claude Code 2.1.143 Linux x64 artifact'
+        'do not claim release-gate PASS without the native Claude Code 2.1.156 Linux x64 artifact'
     );
   }
   if (!existsSync(manifestPath)) {
@@ -119,7 +119,7 @@ async function artifactEvidence(args: Args): Promise<void> {
 
   const patched = composePatches(content, bonsaiPatches, {
     path: bundlePath,
-    version: String(manifest.claudeCodeVersion ?? manifest.version ?? '2.1.143'),
+    version: String(manifest.claudeCodeVersion ?? manifest.version ?? '2.1.156'),
     kind: 'native',
   });
   verifyPatchSentinels(patched, bonsaiPatches);
@@ -128,7 +128,7 @@ async function artifactEvidence(args: Args): Promise<void> {
     generatedAt: new Date().toISOString(),
     operator: process.env.USER ?? 'unknown',
     target: {
-      claudeCodeVersion: manifest.claudeCodeVersion ?? manifest.version ?? '2.1.143',
+      claudeCodeVersion: manifest.claudeCodeVersion ?? manifest.version ?? '2.1.156',
       platform: manifest.platform ?? 'linux-x64',
       installKind: manifest.installKind ?? 'native',
       bundlePath,
@@ -347,7 +347,7 @@ interface LaunchShapeResult {
 }
 
 function defaultNativeBinary(): string {
-  return `${homedir()}/.local/share/claude/versions/2.1.143-cbfix`;
+  return `${homedir()}/.local/share/claude/versions/2.1.156`;
 }
 
 function readProcCmdline(pid: number): string[] {
