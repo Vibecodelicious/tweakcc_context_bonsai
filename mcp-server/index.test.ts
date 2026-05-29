@@ -18,6 +18,7 @@ import {
   resolveRunningClaudeExecutableCandidates,
   routeContextBonsaiTool,
   resolveUniqueBoundary,
+  validateArchiveRangeForClaudeApi,
   validatePruneArgs,
   validateRetrieveArgs,
   type ProcReader,
@@ -170,7 +171,7 @@ describe("context-bonsai-v2 validation", () => {
 
     expect(text).toContain(`Restored content:\n${restoredText}`);
     expect(metadataBlock).not.toBeNull();
-    expect(JSON.parse(Buffer.from(metadataBlock![1], "base64").toString("utf8"))).toEqual({
+    expect(JSON.parse(Buffer.from(metadataBlock![1]!, "base64").toString("utf8"))).toEqual({
       op: "retrieve",
       anchor_id: "anchor-123",
       range_end_id: "anchor-456",
@@ -294,7 +295,32 @@ describe("patch-presence guard", () => {
 
   test("prune proceeds when patch sentinel is present", async () => {
     const sessionId = `test-session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const sessionPath = await createSession(sessionId);
+    const sessionPath = await createSessionWithMessages(sessionId, [
+      {
+        type: "user",
+        uuid: "initial-msg",
+        message: { role: "user", content: "initial" },
+        timestamp: new Date().toISOString(),
+        parentUuid: null,
+        sessionId,
+      },
+      {
+        type: "user",
+        uuid: "msg-1",
+        message: { role: "user", content: "start" },
+        timestamp: new Date().toISOString(),
+        parentUuid: "initial-msg",
+        sessionId,
+      },
+      {
+        type: "assistant",
+        uuid: "msg-2",
+        message: { role: "assistant", content: [{ type: "text", text: "end" }] },
+        timestamp: new Date().toISOString(),
+        parentUuid: "msg-1",
+        sessionId,
+      },
+    ]);
     const markerPath = getArchivedMarkerPath(sessionId);
     markerPaths.push(markerPath);
     await rm(markerPath, { force: true });
@@ -528,6 +554,183 @@ describe("loadSearchableMessages prune tool detection", () => {
     const messages = await loadSearchableMessages(sessionPath);
 
     expect(messages[0]?.hasPruneToolUse).toBe(false);
+  });
+});
+
+describe("validateArchiveRangeForClaudeApi", () => {
+  test("rejects ranges that include the initial conversational message", () => {
+    const messages = [
+      {
+        type: "user",
+        uuid: "initial-user",
+        message: { role: "user", content: "start" },
+        timestamp: new Date().toISOString(),
+        parentUuid: null,
+        sessionId: "session",
+      },
+      {
+        type: "assistant",
+        uuid: "assistant-1",
+        message: { role: "assistant", content: [{ type: "text", text: "done" }] },
+        timestamp: new Date().toISOString(),
+        parentUuid: "initial-user",
+        sessionId: "session",
+      },
+    ] as any;
+
+    expect(validateArchiveRangeForClaudeApi(messages, 0, 1)).toContain("initial session message");
+  });
+
+  test("rejects ranges that leave an orphaned tool_result", () => {
+    const messages = [
+      {
+        type: "user",
+        uuid: "initial-user",
+        message: { role: "user", content: "start" },
+        timestamp: new Date().toISOString(),
+        parentUuid: null,
+        sessionId: "session",
+      },
+      {
+        type: "assistant",
+        uuid: "tool-use",
+        message: { role: "assistant", content: [{ type: "tool_use", id: "toolu-1", name: "Read", input: {} }] },
+        timestamp: new Date().toISOString(),
+        parentUuid: "initial-user",
+        sessionId: "session",
+      },
+      {
+        type: "user",
+        uuid: "tool-result",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu-1", content: "ok" }] },
+        timestamp: new Date().toISOString(),
+        parentUuid: "tool-use",
+        sessionId: "session",
+      },
+    ] as any;
+
+    expect(validateArchiveRangeForClaudeApi(messages, 1, 1)).toContain("unmatched tool_use/tool_result");
+  });
+
+  test("accepts ranges that remove complete tool-call pairs", () => {
+    const messages = [
+      {
+        type: "user",
+        uuid: "initial-user",
+        message: { role: "user", content: "start" },
+        timestamp: new Date().toISOString(),
+        parentUuid: null,
+        sessionId: "session",
+      },
+      {
+        type: "assistant",
+        uuid: "tool-use",
+        message: { role: "assistant", content: [{ type: "tool_use", id: "toolu-1", name: "Read", input: {} }] },
+        timestamp: new Date().toISOString(),
+        parentUuid: "initial-user",
+        sessionId: "session",
+      },
+      {
+        type: "user",
+        uuid: "tool-result",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu-1", content: "ok" }] },
+        timestamp: new Date().toISOString(),
+        parentUuid: "tool-use",
+        sessionId: "session",
+      },
+      {
+        type: "assistant",
+        uuid: "final",
+        message: { role: "assistant", content: [{ type: "text", text: "done" }] },
+        timestamp: new Date().toISOString(),
+        parentUuid: "tool-result",
+        sessionId: "session",
+      },
+    ] as any;
+
+    expect(validateArchiveRangeForClaudeApi(messages, 1, 2)).toBeNull();
+  });
+
+  test("ignores the in-flight triggering prune call when validating the range", () => {
+    // Claude Code appends the prune tool_use line to the JSONL before the MCP
+    // server runs, so the call invoking us is always a trailing, result-less
+    // prune-wrapper tool_use that sits outside any archivable range. It must not
+    // make an otherwise-valid prune self-reject.
+    const messages = [
+      {
+        type: "user",
+        uuid: "initial-user",
+        message: { role: "user", content: "start" },
+        timestamp: new Date().toISOString(),
+        parentUuid: null,
+        sessionId: "session",
+      },
+      {
+        type: "assistant",
+        uuid: "tool-use",
+        message: { role: "assistant", content: [{ type: "tool_use", id: "toolu-1", name: "Read", input: {} }] },
+        timestamp: new Date().toISOString(),
+        parentUuid: "initial-user",
+        sessionId: "session",
+      },
+      {
+        type: "user",
+        uuid: "tool-result",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu-1", content: "ok" }] },
+        timestamp: new Date().toISOString(),
+        parentUuid: "tool-use",
+        sessionId: "session",
+      },
+      {
+        type: "assistant",
+        uuid: "inflight-prune",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "toolu-prune", name: "mcp__context-bonsai__context-bonsai-prune", input: {} },
+          ],
+        },
+        timestamp: new Date().toISOString(),
+        parentUuid: "tool-result",
+        sessionId: "session",
+      },
+    ] as any;
+
+    expect(validateArchiveRangeForClaudeApi(messages, 1, 2)).toBeNull();
+  });
+
+  test("still rejects a genuinely orphaned non-prune tool_use outside the range", () => {
+    // The in-flight exclusion is narrow: only prune wrappers are exempt. A
+    // result-less tool_use from any other tool outside the range still fails
+    // closed, preserving the guard's purpose.
+    const messages = [
+      {
+        type: "user",
+        uuid: "initial-user",
+        message: { role: "user", content: "start" },
+        timestamp: new Date().toISOString(),
+        parentUuid: null,
+        sessionId: "session",
+      },
+      {
+        type: "assistant",
+        uuid: "orphan-tool-use",
+        message: { role: "assistant", content: [{ type: "tool_use", id: "toolu-orphan", name: "Read", input: {} }] },
+        timestamp: new Date().toISOString(),
+        parentUuid: "initial-user",
+        sessionId: "session",
+      },
+      {
+        type: "assistant",
+        uuid: "prunable",
+        message: { role: "assistant", content: [{ type: "text", text: "prune me" }] },
+        timestamp: new Date().toISOString(),
+        parentUuid: "orphan-tool-use",
+        sessionId: "session",
+      },
+    ] as any;
+
+    expect(validateArchiveRangeForClaudeApi(messages, 2, 2)).toContain("unmatched tool_use/tool_result");
   });
 });
 

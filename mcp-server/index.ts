@@ -26,6 +26,10 @@ const MATCHER_UNRESOLVED_FROM = "Error: from_pattern did not match any message."
 const MATCHER_UNRESOLVED_TO = "Error: to_pattern did not match any message.";
 const MATCHER_ORDER_ERROR =
   "Error: from_pattern must resolve to a message that appears before or equal to to_pattern.";
+const PROTECTED_INITIAL_MESSAGE_ERROR =
+  "Error: prune range includes the initial session message; choose a later from_pattern so protected startup context remains visible.";
+const TOOL_HISTORY_ERROR =
+  "Error: prune range would leave unmatched tool_use/tool_result history; expand or narrow the range to keep complete tool-call groups together.";
 const ID_SELECTOR_ERROR =
   "Error: ID selectors are not supported. Use from_pattern and to_pattern only.";
 const PRUNE_ARG_ERROR =
@@ -404,6 +408,109 @@ function hasPruneToolUse(message: SessionMessage): boolean {
   });
 }
 
+function messageContentBlocks(message: SessionMessage): unknown[] {
+  if (message.type !== "user" && message.type !== "assistant") {
+    return [];
+  }
+
+  const content = (message as { message?: { content?: unknown } }).message?.content;
+  return Array.isArray(content) ? content : [];
+}
+
+function toolUseIds(message: SessionMessage): string[] {
+  if (message.type !== "assistant") {
+    return [];
+  }
+
+  return messageContentBlocks(message).flatMap((block) => {
+    if (!block || typeof block !== "object" || Array.isArray(block)) {
+      return [];
+    }
+
+    const candidate = block as { type?: unknown; id?: unknown };
+    return candidate.type === "tool_use" && typeof candidate.id === "string" ? [candidate.id] : [];
+  });
+}
+
+function toolResultIds(message: SessionMessage): string[] {
+  if (message.type !== "user") {
+    return [];
+  }
+
+  return messageContentBlocks(message).flatMap((block) => {
+    if (!block || typeof block !== "object" || Array.isArray(block)) {
+      return [];
+    }
+
+    const candidate = block as { type?: unknown; tool_use_id?: unknown };
+    return candidate.type === "tool_result" && typeof candidate.tool_use_id === "string"
+      ? [candidate.tool_use_id]
+      : [];
+  });
+}
+
+export function validateArchiveRangeForClaudeApi(
+  messages: SessionMessage[],
+  fromIndex: number,
+  toIndex: number
+): string | null {
+  const firstConversationalIndex = messages.findIndex(
+    (message) => message.type === "user" || message.type === "assistant"
+  );
+  if (firstConversationalIndex >= 0 && fromIndex <= firstConversationalIndex && firstConversationalIndex <= toIndex) {
+    return PROTECTED_INITIAL_MESSAGE_ERROR;
+  }
+
+  const allToolResults = new Set<string>();
+  for (const message of messages) {
+    for (const id of toolResultIds(message)) {
+      allToolResults.add(id);
+    }
+  }
+
+  const visibleToolUses = new Set<string>();
+  const visibleToolResults = new Set<string>();
+
+  for (let index = 0; index < messages.length; index += 1) {
+    if (index >= fromIndex && index <= toIndex) {
+      continue;
+    }
+
+    const message = messages[index]!;
+    const isPruneWrapper = hasPruneToolUse(message);
+    for (const id of toolUseIds(message)) {
+      // Skip the in-flight triggering prune call: a prune-wrapper tool_use whose
+      // result has not been written anywhere yet. Claude Code appends the prune
+      // tool_use line to the session JSONL before the MCP server runs, so the
+      // call that is invoking us is always an unmatched out-of-range tool_use.
+      // It can never be part of an archivable range, so counting it would make
+      // every prune self-reject. A genuinely orphaned tool group still fails
+      // closed below because non-wrapper tool_use ids are always counted.
+      if (isPruneWrapper && !allToolResults.has(id)) {
+        continue;
+      }
+      visibleToolUses.add(id);
+    }
+    for (const id of toolResultIds(message)) {
+      visibleToolResults.add(id);
+    }
+  }
+
+  for (const id of visibleToolUses) {
+    if (!visibleToolResults.has(id)) {
+      return TOOL_HISTORY_ERROR;
+    }
+  }
+
+  for (const id of visibleToolResults) {
+    if (!visibleToolUses.has(id)) {
+      return TOOL_HISTORY_ERROR;
+    }
+  }
+
+  return null;
+}
+
 export async function loadSearchableMessages(sessionPath: string): Promise<SearchableMessage[]> {
   const output: SearchableMessage[] = [];
   let index = 0;
@@ -641,6 +748,18 @@ async function handlePruneContext(
 
   const fromUuid = fromMessage.uuid;
   const toUuid = toMessage.uuid;
+  let allMessages: SessionMessage[];
+  try {
+    allMessages = await loadAllMessages(sessionPath);
+  } catch {
+    return errorResult(COMPATIBILITY_ERROR);
+  }
+
+  const rangeError = validateArchiveRangeForClaudeApi(allMessages, fromIndex, toIndex);
+  if (rangeError) {
+    return errorResult(rangeError);
+  }
+
   const summaryUuid = crypto.randomUUID();
   const placeholderText = buildPlaceholder(
     fromUuid,
