@@ -6,6 +6,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { createReadStream } from "fs";
 import { rename, writeFile } from "fs/promises";
 import { readlink } from "fs/promises";
@@ -110,6 +111,17 @@ interface ToolResponseMetadata {
   placeholder_text: string;
 }
 
+// MCP CallToolResult shape (narrowed to the text-block content this server
+// emits). isError is optional and MUST be set on deterministic failures/refusals
+// so the host does not render them as completed, successful tool calls. It is
+// never set on success. The index signature keeps this assignable to the SDK's
+// CallToolResult (which carries one) at the request-handler boundary.
+interface ToolResult {
+  content: Array<{ type: "text"; text: string }>;
+  isError?: boolean;
+  [key: string]: unknown;
+}
+
 function isUuidPattern(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
@@ -152,8 +164,15 @@ function normalizeIndexTerms(value: unknown): string[] | null {
   return terms;
 }
 
-function plainText(text: string): { content: Array<{ type: "text"; text: string }> } {
+function plainText(text: string): ToolResult {
   return { content: [{ type: "text", text }] };
+}
+
+// Deterministic failure/refusal result. The body stays plain text (per the
+// shared spec Output rules); isError:true governs only the host's error channel
+// so a refusal is never presented as a successful operation (Defect B).
+function errorResult(text: string): ToolResult {
+  return { content: [{ type: "text", text }], isError: true };
 }
 
 export function encodeToolResponseMetadata(metadata: ToolResponseMetadata): string {
@@ -314,9 +333,7 @@ export async function assertRunningClaudeHasArchivedFilterPatch(
   return archivedFilterPatchPresentInAny(candidates);
 }
 
-function successResponse(text: string, metadata: ToolResponseMetadata): {
-  content: Array<{ type: "text"; text: string }>;
-} {
+function successResponse(text: string, metadata: ToolResponseMetadata): ToolResult {
   return plainText(`${text}\n${encodeToolResponseMetadata(metadata)}`);
 }
 
@@ -505,7 +522,7 @@ export async function finalizeRetrieveAfterMutation(
   placeholderText: string,
   clearAnchorMetadata: () => Promise<void>,
   restoredText?: string
-): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+): Promise<ToolResult> {
   try {
     await clearAnchorMetadata();
   } catch {
@@ -579,28 +596,28 @@ async function handlePruneContext(
     discoverSessionPath,
     assertArchivedFilterPatchPresent: assertRunningClaudeHasArchivedFilterPatch,
   }
-): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+): Promise<ToolResult> {
   const validated = validatePruneArgs(args);
   if (!validated.ok) {
-    return plainText(validated.error);
+    return errorResult(validated.error);
   }
 
   if (!(await deps.assertArchivedFilterPatchPresent())) {
-    return plainText(PATCH_MISSING_ERROR);
+    return errorResult(PATCH_MISSING_ERROR);
   }
 
   let sessionPath: string;
   try {
     sessionPath = await deps.discoverSessionPath();
   } catch {
-    return plainText(COMPATIBILITY_ERROR);
+    return errorResult(COMPATIBILITY_ERROR);
   }
 
   let searchable: SearchableMessage[];
   try {
     searchable = await loadSearchableMessages(sessionPath);
   } catch {
-    return plainText(COMPATIBILITY_ERROR);
+    return errorResult(COMPATIBILITY_ERROR);
   }
 
   let fromIndex: number;
@@ -609,17 +626,17 @@ async function handlePruneContext(
     fromIndex = resolveUniqueBoundary(searchable, validated.fromPattern, "from");
     toIndex = resolveUniqueBoundary(searchable, validated.toPattern, "to");
   } catch (error) {
-    return plainText(error instanceof Error ? error.message : String(error));
+    return errorResult(error instanceof Error ? error.message : String(error));
   }
 
   if (fromIndex > toIndex) {
-    return plainText(MATCHER_ORDER_ERROR);
+    return errorResult(MATCHER_ORDER_ERROR);
   }
 
   const fromMessage = searchable[fromIndex];
   const toMessage = searchable[toIndex];
   if (!fromMessage || !toMessage) {
-    return plainText(COMPATIBILITY_ERROR);
+    return errorResult(COMPATIBILITY_ERROR);
   }
 
   const fromUuid = fromMessage.uuid;
@@ -694,7 +711,9 @@ async function handlePruneContext(
       placeholder_text: placeholderText,
     });
   } catch {
-    return plainText("Error: prune failed.");
+    // Post-mutation partial failure (mutation began above). Surface as an error
+    // so the host does not treat a partially-applied prune as a clean success.
+    return errorResult("Error: prune failed.");
   }
 }
 
@@ -714,24 +733,24 @@ export function validateRetrieveArgs(args: RetrieveArgs):
   return { ok: true, anchorId };
 }
 
-async function handleRetrieveContext(args: RetrieveArgs): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+async function handleRetrieveContext(args: RetrieveArgs): Promise<ToolResult> {
   const validated = validateRetrieveArgs(args);
   if (!validated.ok) {
-    return plainText(validated.error);
+    return errorResult(validated.error);
   }
 
   let sessionPath: string;
   try {
     sessionPath = await discoverSessionPath();
   } catch {
-    return plainText(COMPATIBILITY_ERROR);
+    return errorResult(COMPATIBILITY_ERROR);
   }
 
   let currentMessages: SessionMessage[];
   try {
     currentMessages = await loadAllMessages(sessionPath);
   } catch {
-    return plainText(COMPATIBILITY_ERROR);
+    return errorResult(COMPATIBILITY_ERROR);
   }
 
   const anchorIndex = currentMessages.findIndex((message) => messageUuid(message) === validated.anchorId);
@@ -740,12 +759,12 @@ async function handleRetrieveContext(args: RetrieveArgs): Promise<{ content: Arr
     | undefined;
 
   if (!anchorMessage) {
-    return plainText(RETRIEVE_NOT_FOUND);
+    return errorResult(RETRIEVE_NOT_FOUND);
   }
 
   const metadata = anchorMessage.context_bonsai_v2;
   if (!metadata || metadata.archived !== true || !metadata.summary_uuid) {
-    return plainText(RETRIEVE_NOT_ARCHIVED);
+    return errorResult(RETRIEVE_NOT_ARCHIVED);
   }
 
   const placeholderText = buildPlaceholder(
@@ -763,7 +782,7 @@ async function handleRetrieveContext(args: RetrieveArgs): Promise<{ content: Arr
   try {
     await retrieveSession(sessionPath, [metadata.summary_uuid]);
   } catch {
-    return plainText(RETRIEVE_NOT_ARCHIVED);
+    return errorResult(RETRIEVE_NOT_ARCHIVED);
   }
 
   return finalizeRetrieveAfterMutation(
@@ -840,7 +859,7 @@ export async function routeContextBonsaiTool(
   name: string,
   args: unknown,
   deps?: Partial<PruneDependencies>
-): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+): Promise<ToolResult> {
   if (name === "context-bonsai-prune") {
     return handlePruneContext((args as PruneArgs) || {}, {
       discoverSessionPath: deps?.discoverSessionPath ?? discoverSessionPath,
@@ -871,7 +890,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: listContextBonsaiTools(),
 }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
   return routeContextBonsaiTool(request.params.name, request.params.arguments);
 });
 

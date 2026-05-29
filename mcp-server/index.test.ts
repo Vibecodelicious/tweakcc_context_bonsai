@@ -284,7 +284,10 @@ describe("patch-presence guard", () => {
       }
     );
 
-    expect(response).toEqual({ content: [{ type: "text", text: PATCH_MISSING_ERROR }] });
+    expect(response).toEqual({
+      content: [{ type: "text", text: PATCH_MISSING_ERROR }],
+      isError: true,
+    });
     expect(await Bun.file(sessionPath).text()).toBe(before);
     expect(await Bun.file(markerPath).exists()).toBe(false);
   });
@@ -311,7 +314,63 @@ describe("patch-presence guard", () => {
     );
 
     expect(response.content[0]?.text).toContain("Prune complete. anchor_id=msg-1");
+    // Success MUST NOT carry the error flag.
+    expect(response.isError).toBeUndefined();
     expect(await Bun.file(markerPath).json()).toEqual(["msg-1", "msg-2"]);
+  });
+});
+
+describe("failure result shape (Defect B) — deterministic failures carry isError", () => {
+  test("patch-missing refusal returns isError:true and is not success-shaped", async () => {
+    const sessionId = `test-session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const sessionPath = await createSession(sessionId);
+    const markerPath = getArchivedMarkerPath(sessionId);
+    markerPaths.push(markerPath);
+    await rm(markerPath, { force: true });
+
+    const response = await routeContextBonsaiTool(
+      "context-bonsai-prune",
+      {
+        from_pattern: "start",
+        to_pattern: "end",
+        summary: "summary",
+        index_terms: ["topic"],
+      },
+      {
+        discoverSessionPath: async () => sessionPath,
+        assertArchivedFilterPatchPresent: async () => false,
+      }
+    );
+
+    // Defect B: pre-fix this returned { content: [...] } with no isError, so the
+    // host rendered the refusal as a completed, successful tool call. Post-fix the
+    // error channel is set.
+    expect(response.isError).toBe(true);
+    expect(response.content[0]?.text).toBe(PATCH_MISSING_ERROR);
+    // Not shaped like a success: no encoded tool-response metadata block.
+    expect(response.content[0]?.text ?? "").not.toContain("<context-bonsai-tool-response");
+  });
+
+  test("invalid prune args (deterministic pre-mutation refusal) returns isError:true", async () => {
+    const response = await routeContextBonsaiTool("context-bonsai-prune", {
+      from_pattern: "start",
+      // missing to_pattern / summary / index_terms
+    });
+
+    expect(response.isError).toBe(true);
+    expect(response.content[0]?.text).toBe(
+      "Error: prune requires from_pattern, to_pattern, summary, and index_terms."
+    );
+  });
+
+  test("retrieve with invalid args returns isError:true", async () => {
+    const response = await routeContextBonsaiTool("context-bonsai-retrieve", {
+      anchor_id: "abc",
+      extra: "nope",
+    });
+
+    expect(response.isError).toBe(true);
+    expect(response.content[0]?.text).toBe("Error: retrieve requires only anchor_id.");
   });
 });
 
