@@ -108,6 +108,26 @@ describe('injected archived UUID filter', () => {
     ]);
   });
 
+  test('filters archived api_system rows so provider output has no orphan system adjacency', async () => {
+    const configDir = await makeTempDir();
+    await writeFile(
+      join(configDir, `archived-${sessionId}.json`),
+      JSON.stringify(['archived-user', 'archived-system', 'archived-assistant'])
+    );
+    const visibilityPredicate = buildPatchedVisibilityPredicate(configDir);
+
+    expect(visibilityPredicate([
+      message('active-before', 'before'),
+      message('archived-user', 'archived user'),
+      message('archived-system', 'archived system', 'api_system'),
+      message('archived-assistant', 'archived assistant', 'assistant'),
+      message('active-after', 'after'),
+    ])).toEqual([
+      { role: 'user', content: 'before' },
+      { role: 'user', content: 'after' },
+    ]);
+  });
+
   test('picks up marker rewrites to another UUID set without forced mtime changes', async () => {
     const configDir = await makeTempDir();
     const markerPath = join(configDir, `archived-${sessionId}.json`);
@@ -256,8 +276,8 @@ function fakePatchContext() {
   };
 }
 
-function message(uuid: string, content = 'visible content'): { type: string; uuid: string; message: { content: string } } {
-  return { type: 'user', uuid, message: { content } };
+function message(uuid: string, content = 'visible content', type = 'user'): { type: string; uuid: string; message: { content: string } } {
+  return { type, uuid, message: { content } };
 }
 
 async function makeTempDir(): Promise<string> {
