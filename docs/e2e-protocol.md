@@ -83,8 +83,20 @@ If a required dependency is unavailable, classify the run as `BLOCKED`.
 - Tool-response stdout from MCP (visible in Claude Code's transcript as `tool_result` blocks).
 - Optional: tweakcc UI capture (TUI screenshot or `script(1)` log) if patches applied.
 - Pinned-target artifact evidence: the frozen native `2.1.156` `extracted.js` + `manifest.json` (stored out-of-repo under `/tmp/cc-bonsai-artifacts/claude-code/2.1.156/native/` per the Evidence Retention Policy; pass via `--bundle`/`--manifest`), and the run's evidence JSON.
+- Provider-request capture: the actual request body sent to the model API (see below). This is the only source that shows the real internal→provider mapping — injected `role:"system"` reminders, `local_command`→`user`, dropped `turn_duration` — none of which appear in the JSONL. It is the authority for message-ordering claims (E2E-08).
 
-Prefer JSONL inspection over stdout where both are available.
+Prefer JSONL inspection over stdout where both are available. For any claim about what the provider receives or rejects, prefer provider-request capture over JSONL — the JSONL is the stored transcript, not the transformed request.
+
+## Provider-Request Capture (observing the real transform)
+
+The archived-filter and the host's internal→provider mapping run only at request-build time, so message-ordering bugs (a `role:"system"` reminder left not preceding an assistant, etc.) are invisible in the JSONL. To observe the real request:
+
+1. Run a local forwarding proxy: a plain-HTTP server that records each request body and upstream status, then forwards to `https://api.anthropic.com` using the request's own headers. There is **no TLS interception** — the binary→proxy hop is plain HTTP via `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`; the proxy→API hop is an ordinary outbound TLS `fetch`. (Verify the proxy works with a throwaway request before trusting it: a forwarded `/healthz` returns the real API's `404`.)
+2. Launch the patched binary against it on the session under test: `ANTHROPIC_BASE_URL=http://127.0.0.1:<port> claude -r <session-id>`. The captured `/v1/messages` body is the real provider transcript.
+
+**Always verify the capture actually filtered before reasoning from it.** A capture is valid only if filtering occurred: confirm an archived-only sentinel string is absent from the request body and that the provider message count dropped versus the unfiltered transcript. If archived content is still present, the capture is invalid — discard it. The filter reads `~/.claude/archived-<session-id>.json` for the running session (path built from `sessionIdFunc()` in `archived-filter.patch.ts`), so a captured request with no filtering means the marker the runtime looked for was not the one you wrote.
+
+To test a fix against the real ordering rule rather than a model of it, save the binary's auth headers from one captured request and replay hand-edited variants of the array (e.g. one that strands a system reminder vs. one that does not) directly to `/v1/messages`; the API's `200`/`400` is the oracle. The marker file is the lever for binary-driven variants — adding/removing UUIDs is exactly what a widen/narrow fix does. Capture artifacts live out-of-repo (e.g. under `/tmp/`) and are never committed.
 
 ## Scenarios
 
