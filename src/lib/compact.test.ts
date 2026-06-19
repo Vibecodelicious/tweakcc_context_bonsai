@@ -3,7 +3,7 @@ import { describe, expect, test, beforeEach, afterEach, mock } from 'bun:test';
 import { mkdir, rm, writeFile, readFile } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { markMessagesArchived, compactSession, getArchivedMarkerPath, unarchiveMessages, retrieveSession, getArchivedMarkerUuids } from './compact';
+import { markMessagesArchived, compactSession, getArchivedMarkerPath, unarchiveMessages, retrieveSession } from './compact';
 
 // Create a temp directory for test files
 let testDir: string;
@@ -53,21 +53,6 @@ function createTestMessages(count: number, sessionId: string = 'test-session'): 
     });
   }
   return messages;
-}
-
-function createSystemMessage(uuid: string, subtype: string, sessionId: string = 'test-session'): unknown {
-  return {
-    sessionId,
-    uuid,
-    parentUuid: null,
-    timestamp: new Date().toISOString(),
-    cwd: '/test/project',
-    version: '1.0.0',
-    gitBranch: 'main',
-    type: 'system',
-    subtype,
-    message: { role: 'system', content: `${subtype} metadata` },
-  };
 }
 
 async function writeTestSession(filePath: string, messages: unknown[]): Promise<void> {
@@ -343,16 +328,6 @@ describe('compactSession', () => {
 });
 
 describe('marker file (archived UUIDs)', () => {
-  test('derives marker UUIDs from every string uuid without messageId fallback', () => {
-    expect(getArchivedMarkerUuids([
-      { type: 'user', uuid: 'user-1' } as any,
-      { type: 'system', uuid: 'system-1' } as any,
-      { type: 'summary', uuid: 'summary-placeholder' } as any,
-      { type: 'file-history-snapshot', messageId: 'snapshot-1' } as any,
-      { type: 'system', uuid: 42 } as any,
-    ])).toEqual(['user-1', 'system-1', 'summary-placeholder']);
-  });
-
   test('creates marker file with archived UUIDs on first compaction', async () => {
     const sessionId = `test-session-${Date.now()}`;
     const sessionPath = join(testDir, `${sessionId}.jsonl`);
@@ -421,41 +396,6 @@ describe('marker file (archived UUIDs)', () => {
     expect(new Set(markerContent).size).toBe(2);
 
     // Cleanup marker file
-    await rm(markerPath, { force: true });
-  });
-
-  test('writes marker UUIDs for interleaved system metadata rows in archived range', async () => {
-    const sessionId = `test-session-${Date.now()}`;
-    const sessionPath = join(testDir, `${sessionId}.jsonl`);
-    const baseMessages = createTestMessages(4, sessionId);
-    const messages = [
-      baseMessages[0],
-      baseMessages[1],
-      createSystemMessage('system-local-command', 'local_command', sessionId),
-      createSystemMessage('system-turn-duration', 'turn_duration', sessionId),
-      baseMessages[2],
-      baseMessages[3],
-    ];
-    await writeTestSession(sessionPath, messages);
-
-    await markMessagesArchived(sessionPath, 'msg-1', 'msg-2', 'summary-uuid-1');
-
-    const markerPath = getArchivedMarkerPath(sessionId);
-    const markerContent = await Bun.file(markerPath).json();
-
-    expect(markerContent).toEqual([
-      'msg-1',
-      'system-local-command',
-      'system-turn-duration',
-      'msg-2',
-    ]);
-
-    const updated = await readSessionFile(sessionPath);
-    const systemRow = updated.find((m: unknown) => (m as { uuid?: string }).uuid === 'system-local-command') as {
-      archived?: boolean;
-    };
-    expect(systemRow.archived).toBeUndefined();
-
     await rm(markerPath, { force: true });
   });
 });
@@ -844,59 +784,6 @@ describe('retrieveSession', () => {
     expect(markerContent).toContain('msg-5');
 
     // Cleanup
-    await rm(markerPath, { force: true });
-  });
-
-  test('removes marker UUIDs for restored system metadata rows while preserving unrelated markers', async () => {
-    const sessionId = `test-session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const sessionPath = join(testDir, `${sessionId}.jsonl`);
-    const baseMessages = createTestMessages(8, sessionId);
-    const messages = [
-      baseMessages[0],
-      baseMessages[1],
-      createSystemMessage('system-local-command', 'local_command', sessionId),
-      createSystemMessage('system-away-summary', 'away_summary', sessionId),
-      baseMessages[2],
-      baseMessages[3],
-      baseMessages[4],
-      baseMessages[5],
-      baseMessages[6],
-      baseMessages[7],
-    ];
-    await writeTestSession(sessionPath, messages);
-
-    const markerPath = getArchivedMarkerPath(sessionId);
-    const compact1 = await compactSession(sessionPath, 'msg-1', 'msg-2', { skipSummary: true });
-    await compactSession(sessionPath, 'msg-4', 'msg-5', { skipSummary: true });
-
-    let markerContent = await Bun.file(markerPath).json();
-    expect(markerContent).toContain('msg-1');
-    expect(markerContent).toContain('system-local-command');
-    expect(markerContent).toContain('system-away-summary');
-    expect(markerContent).toContain('msg-2');
-    expect(markerContent).toContain('msg-4');
-    expect(markerContent).toContain('msg-5');
-
-    await retrieveSession(sessionPath, [compact1.summaryUuid]);
-
-    markerContent = await Bun.file(markerPath).json();
-    expect(markerContent).not.toContain('msg-1');
-    expect(markerContent).not.toContain('system-local-command');
-    expect(markerContent).not.toContain('system-away-summary');
-    expect(markerContent).not.toContain('msg-2');
-    expect(markerContent).toContain('msg-4');
-    expect(markerContent).toContain('msg-5');
-
-    const updated = await readSessionFile(sessionPath);
-    const msg1 = updated.find((m: unknown) => (m as { uuid?: string }).uuid === 'msg-1') as {
-      archived?: boolean;
-    };
-    const systemRow = updated.find((m: unknown) => (m as { uuid?: string }).uuid === 'system-away-summary') as {
-      archived?: boolean;
-    };
-    expect(msg1.archived).toBeUndefined();
-    expect(systemRow.archived).toBeUndefined();
-
     await rm(markerPath, { force: true });
   });
 

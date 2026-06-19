@@ -112,13 +112,6 @@ export async function addArchivedMarkerEntries(
   await writeArchivedMarker(sessionId, archivedUuids);
 }
 
-export function getArchivedMarkerUuids(messages: SessionMessage[]): string[] {
-  return messages.flatMap((message) => {
-    const uuid = (message as { uuid?: unknown }).uuid;
-    return typeof uuid === 'string' ? [uuid] : [];
-  });
-}
-
 /**
  * Removes specified UUIDs from the archived marker file.
  * This is called during retrieve operations to unmark messages that are
@@ -247,9 +240,8 @@ export async function markMessagesArchived(
   const rangeResult = await getMessageRange(sessionPath, fromUuid, toUuid);
   const archivedMessages = rangeResult.messages;
   const archiveUuids = new Set<string>();
-  const archivedMarkerUuids = getArchivedMarkerUuids(archivedMessages);
 
-  // Preserve existing archive metadata semantics for conversational rows.
+  // Collect UUIDs of messages that have uuid field (user/assistant)
   for (const msg of archivedMessages) {
     if (msg.type === 'user' || msg.type === 'assistant') {
       archiveUuids.add(msg.uuid);
@@ -331,7 +323,7 @@ export async function markMessagesArchived(
     await writeJsonlAtomic(sessionPath, allMessages);
 
     // Write marker file only after session write succeeds
-    await addArchivedMarkerEntries(sessionPath, archivedMarkerUuids);
+    await addArchivedMarkerEntries(sessionPath, Array.from(archiveUuids));
   }
 
   return {
@@ -420,7 +412,9 @@ export async function compactSession(
   await writeJsonlAtomic(sessionPath, allMessages);
 
   // Keep marker in sync with newly archived messages (best-effort).
-  const archivedUuids = getArchivedMarkerUuids(messages);
+  const archivedUuids = messages
+    .filter((message) => message.type === 'user' || message.type === 'assistant')
+    .map((message) => message.uuid);
   try {
     await addArchivedMarkerEntries(sessionPath, archivedUuids);
   } catch {
@@ -432,94 +426,6 @@ export async function compactSession(
     summary,
     summaryUuid,
   };
-}
-
-async function getMarkerUuidsForRetrieve(
-  sessionPath: string,
-  ids: string[]
-): Promise<string[]> {
-  const allMessages: SessionMessage[] = [];
-  const uuidToIndex = new Map<string, number>();
-
-  const readStream = createReadStream(sessionPath);
-  const rl = createInterface({
-    input: readStream,
-    crlfDelay: Infinity,
-  });
-
-  let lineNumber = 0;
-  let lastLine: string | null = null;
-  let lastLineNumber = 0;
-
-  try {
-    for await (const line of rl) {
-      lineNumber++;
-
-      if (lastLine !== null) {
-        try {
-          const message = JSON.parse(lastLine) as SessionMessage;
-          const idx = allMessages.length;
-          allMessages.push(message);
-
-          const uuid = getMessageUuidFromAny(message);
-          if (uuid) {
-            uuidToIndex.set(uuid, idx);
-          }
-        } catch (err) {
-          throw new Error(
-            `Invalid JSON at line ${lastLineNumber} in ${sessionPath}: ${
-              err instanceof Error ? err.message : String(err)
-            }`
-          );
-        }
-      }
-
-      lastLine = line.trim();
-      lastLineNumber = lineNumber;
-    }
-
-    if (lastLine !== null && lastLine !== '') {
-      try {
-        const message = JSON.parse(lastLine) as SessionMessage;
-        const idx = allMessages.length;
-        allMessages.push(message);
-
-        const uuid = getMessageUuidFromAny(message);
-        if (uuid) {
-          uuidToIndex.set(uuid, idx);
-        }
-      } catch {
-        // Skip incomplete final line silently, matching unarchiveMessages.
-      }
-    }
-  } finally {
-    readStream.close();
-  }
-
-  const markerUuids = new Set<string>();
-  for (const id of new Set(ids)) {
-    const index = uuidToIndex.get(id);
-    if (index === undefined) {
-      continue;
-    }
-
-    const message = allMessages[index];
-    if (message?.type === 'summary' && message.compactMetadata) {
-      const fromIndex = uuidToIndex.get(message.compactMetadata.fromMessageId);
-      const toIndex = uuidToIndex.get(message.compactMetadata.toMessageId);
-      if (fromIndex === undefined || toIndex === undefined) {
-        continue;
-      }
-
-      for (const uuid of getArchivedMarkerUuids(allMessages.slice(fromIndex, toIndex + 1))) {
-        markerUuids.add(uuid);
-      }
-    } else if (typeof id === 'string') {
-      markerUuids.add(id);
-    }
-  }
-
-  return Array.from(markerUuids);
 }
 
 
@@ -770,15 +676,14 @@ export async function retrieveSession(
   sessionPath: string,
   ids: string[]
 ): Promise<RetrieveResult> {
-  const markerUuidsToRemove = await getMarkerUuidsForRetrieve(sessionPath, ids);
-
   // Step 1: Call unarchiveMessages with the IDs array
   const unarchiveResult = await unarchiveMessages(sessionPath, ids);
 
   // Step 2: Extract session ID from session path
   const sessionId = extractSessionId(sessionPath);
 
-  // Step 3: Collect unarchived user/assistant UUIDs for the public result.
+  // Step 3: Collect unarchived message UUIDs only (user/assistant, NOT summary UUIDs)
+  // Summary UUIDs are never in the marker file
   const unarchivedUuids: string[] = [];
   for (const msg of unarchiveResult.messages) {
     if (msg.type === 'user' || msg.type === 'assistant') {
@@ -786,9 +691,9 @@ export async function retrieveSession(
     }
   }
 
-  // Step 4: Update marker file to remove every UUID-bearing row in restored intervals (best-effort).
+  // Step 4: Update marker file to remove unarchived UUIDs (best-effort).
   try {
-    await removeFromArchivedMarker(sessionId, markerUuidsToRemove);
+    await removeFromArchivedMarker(sessionId, unarchivedUuids);
   } catch {
     // Marker cleanup failure must not report an error after session mutation.
   }

@@ -169,7 +169,7 @@ claude --new-session
 
 **Execution:**
 
-1. Drive ~10 turns of conversation establishing distinct topics with unique boundary phrases (e.g. "ALPHA-PHRASE-001 begin discussion", "OMEGA-PHRASE-001 end discussion"). Include at least one Claude Code host/meta event inside the intended span, such as `/context`, a local command that records a `local_command` row, an away summary, or another JSONL `type: "system"` subtype row.
+1. Drive ~10 turns of conversation establishing distinct topics with unique boundary phrases (e.g. "ALPHA-PHRASE-001 begin discussion", "OMEGA-PHRASE-001 end discussion").
 2. Ask Claude to prune the range from "ALPHA-PHRASE-001" to "OMEGA-PHRASE-001" with a meaningful summary and index terms.
 3. Continue with one more turn that references the pre-prune topic; observe that Claude no longer has direct access (only the placeholder summary).
 
@@ -193,17 +193,15 @@ Look for:
 - A `tool_use` block with `name: "mcp__context-bonsai__context-bonsai-prune"` and the expected `input`.
 - A subsequent `tool_result` block with success metadata + anchor id.
 - A `summary`-typed JSONL entry replacing the archived range, carrying `context_bonsai_v2.archived: true`.
-- `~/.claude/archived-$SESSION_ID.json` includes every string-`uuid` row in the original archived interval, including any interleaved JSONL `type: "system"` rows, and does not include the appended summary placeholder UUID.
 - A follow-up assistant response that can use only the placeholder summary, not verbatim pruned content.
-- The immediate follow-up turn succeeds without Anthropic provider role-ordering errors such as orphan or invalid `system` message adjacency.
 
 **Verdict rules:**
 
-- `PASS`: tool call succeeded, archive marker file written with full archived-interval UUID coverage including system/meta rows, subsequent assistant turn references only the summary (not the original blocks), and no provider role-ordering error occurs.
+- `PASS`: tool call succeeded, archive marker file written, subsequent assistant turn references only the summary (not the original blocks).
 - `BLOCKED`: MCP transport failure, missing JSONL, or pre-flight unavailable.
-- `FAIL`: tool call returned success but transcript still shows the original blocks; marker file missing or omits UUID-bearing system/meta rows from the archived interval; model still recalls the original content verbatim; or the follow-up provider request fails with role-ordering errors.
+- `FAIL`: tool call returned success but transcript still shows the original blocks; or marker file missing; or model still recalls the original content verbatim.
 
-**Reason codes:** `prune-success`, `mcp-transport-fail`, `marker-missing`, `marker-system-meta-missing`, `placeholder-not-visible`, `provider-role-ordering-error`, `partial-mutation`.
+**Reason codes:** `prune-success`, `mcp-transport-fail`, `marker-missing`, `placeholder-not-visible`, `partial-mutation`.
 
 ### E2E-02 — Boundary ambiguity / unresolved rejection
 

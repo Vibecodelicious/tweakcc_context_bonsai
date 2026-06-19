@@ -11,7 +11,7 @@ import { createReadStream } from "fs";
 import { rename, writeFile } from "fs/promises";
 import { readlink } from "fs/promises";
 import { findCurrentSession, findSessionPath, readSessionMessages } from "../src/lib/session";
-import { addArchivedMarkerEntries, getArchivedMarkerUuids, markMessagesArchived, retrieveSession } from "../src/lib/compact";
+import { addArchivedMarkerEntries, markMessagesArchived, retrieveSession } from "../src/lib/compact";
 import type { SessionMessage, CompactMetadata } from "../src/types";
 
 export const ARCHIVED_FILTER_SENTINEL = "/*cb:archived-filter:v1*/";
@@ -814,7 +814,9 @@ async function handlePruneContext(
     markResult.allMessages.push(placeholderMessage);
     await writeJsonlAtomic(sessionPath, markResult.allMessages);
 
-    const archivedUuids = getArchivedMarkerUuids(markResult.messages);
+    const archivedUuids = markResult.messages
+      .filter((message) => message.type === "user" || message.type === "assistant")
+      .map((message) => message.uuid);
     try {
       await addArchivedMarkerEntries(sessionPath, archivedUuids);
     } catch {
