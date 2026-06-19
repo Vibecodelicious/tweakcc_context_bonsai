@@ -23,6 +23,7 @@ This document defines model-visible behavior only. Internal runtime wiring is in
 - ID selectors MUST be rejected with deterministic plain-text error.
 - One call MUST archive exactly one contiguous inclusive range.
 - Placeholder rendering MUST expose archive range, summary, and index terms.
+- A successful prune MUST yield a provider request that satisfies the provider's message-ordering rules; hiding the archived range MUST NOT leave any provider message in an invalid position. Depends on the message-structure facts and omission mechanism in runtime-architecture.md ("Provider Message Structure and Range Omission").
 
 ## 3. Retrieve Contract
 

@@ -45,6 +45,15 @@ This document defines the trusted runtime boundary, compatibility assumptions, a
 - Archive visibility state is represented by stable archive metadata that survives process restarts.
 - v1 default is marker-free behavior unless an implementation blocker forces marker usage in a later story.
 
+## Provider Message Structure and Range Omission
+
+- **Request assembly.** Before each model request, Claude Code builds the provider-bound array — the per-request array sent to the model — from the session transcript (the persisted messages read via `loadMessages`), then inserts ephemeral units that are not part of the transcript.
+- **Ephemeral injected units.** Injected units, such as context reminders and deferred-tool or hook notices, are not stored in the transcript and are regenerated on each request. Each is marked `isMeta` and is sent to the provider as a `system`-role message, and each receives a newly generated identifier per request, so it has no identifier that is stable across requests. An injected unit can sit between the boundaries of an archived range.
+- **Provider ordering constraint.** In the provider-bound array, a `system`-role message MUST be immediately followed by an `assistant` message or be the last element; the provider rejects any other placement.
+- **Range omission MUST be positional.** Hiding an archived range MUST remove every message positioned between the range boundaries (its first and last transcript message) in the assembled provider-bound array — that is, after ephemeral injection — selected by position, not by identifier. Positional selection is required because an injected unit carries an unrecorded, per-request identifier; identifier-based selection leaves it in the array, and the surviving `system`-role unit then violates the ordering constraint once its neighboring transcript messages are removed.
+- **Range records are boundary pairs, not message lists.** The durable archive record MUST represent each archived range by its boundary pair — the first and last transcript message — persisted independently of the per-request array so the range resolves on every request, including after session resume. The boundary pair is the only persisted selection state: the record MUST NOT also record member or interior message identifiers (range members include ephemeral injected units whose identifiers are unstable, so interior membership is resolved positionally at build time), and MUST NOT live only in an in-array placeholder (which is not guaranteed to survive resume).
+- **Conformance check.** Archiving a range that contains an injected `system`-role unit MUST yield a provider-bound array with no message between the boundaries, accepted by the provider.
+
 ## Minimized Bundle Patch Strategy (Fail-Closed)
 
 - Discovery uses minification-resilient structural/runtime signatures only:
