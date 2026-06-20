@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdir, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { getArchivedMarkerPath, markMessagesArchived } from "../src/lib/compact";
+import { markMessagesArchived } from "../src/lib/compact";
 import {
   ARCHIVED_FILTER_SENTINEL,
   PATCH_MISSING_ERROR,
@@ -25,17 +25,12 @@ import {
 } from "./index";
 
 let testDir = "";
-let markerPaths: string[] = [];
 
 afterEach(async () => {
   if (testDir) {
     await rm(testDir, { recursive: true, force: true });
     testDir = "";
   }
-  for (const markerPath of markerPaths) {
-    await rm(markerPath, { force: true });
-  }
-  markerPaths = [];
 });
 
 async function createSession(sessionId: string): Promise<string> {
@@ -142,16 +137,15 @@ describe("context-bonsai-v2 validation", () => {
     }
   });
 
-  test("prune prewrite path does not mutate marker state", async () => {
+  test("prune prewrite path is purely mark-only when skipWrite is set", async () => {
     const sessionId = `test-session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const sessionPath = await createSession(sessionId);
-    const markerPath = getArchivedMarkerPath(sessionId);
-    markerPaths.push(markerPath);
+    const before = await Bun.file(sessionPath).text();
 
-    await rm(markerPath, { force: true });
     await markMessagesArchived(sessionPath, "msg-1", "msg-2", "summary-uuid", { skipWrite: true });
 
-    expect(await Bun.file(markerPath).exists()).toBe(false);
+    const after = await Bun.file(sessionPath).text();
+    expect(after).toBe(before);
   });
 
   test("retrieve post-mutation cleanup failure still reports success", async () => {
@@ -266,10 +260,7 @@ describe("patch-presence guard", () => {
   test("prune fails closed before marker or JSONL writes when patch sentinel is absent", async () => {
     const sessionId = `test-session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const sessionPath = await createSession(sessionId);
-    const markerPath = getArchivedMarkerPath(sessionId);
-    markerPaths.push(markerPath);
     const before = await Bun.file(sessionPath).text();
-    await rm(markerPath, { force: true });
 
     const response = await routeContextBonsaiTool(
       "context-bonsai-prune",
@@ -290,7 +281,6 @@ describe("patch-presence guard", () => {
       isError: true,
     });
     expect(await Bun.file(sessionPath).text()).toBe(before);
-    expect(await Bun.file(markerPath).exists()).toBe(false);
   });
 
   test("prune proceeds when patch sentinel is present", async () => {
@@ -321,9 +311,6 @@ describe("patch-presence guard", () => {
         sessionId,
       },
     ]);
-    const markerPath = getArchivedMarkerPath(sessionId);
-    markerPaths.push(markerPath);
-    await rm(markerPath, { force: true });
 
     const response = await routeContextBonsaiTool(
       "context-bonsai-prune",
@@ -342,7 +329,12 @@ describe("patch-presence guard", () => {
     expect(response.content[0]?.text).toContain("Prune complete. anchor_id=msg-1");
     // Success MUST NOT carry the error flag.
     expect(response.isError).toBeUndefined();
-    expect(await Bun.file(markerPath).json()).toEqual(["msg-1", "msg-2"]);
+    const sessionLines = (await Bun.file(sessionPath).text()).trim().split(/\n+/);
+    const messages = sessionLines.map((line) => JSON.parse(line)).filter((msg) => msg);
+    const archived = messages.filter((msg: any) => msg && msg.archived === true);
+    expect(archived.length).toBe(2);
+    expect(archived.map((msg: any) => msg.uuid)).toEqual(expect.arrayContaining(["msg-1", "msg-2"]));
+    expect(messages.some((msg: any) => msg.type === "summary")).toBe(true);
   });
 });
 
@@ -350,9 +342,6 @@ describe("failure result shape (Defect B) — deterministic failures carry isErr
   test("patch-missing refusal returns isError:true and is not success-shaped", async () => {
     const sessionId = `test-session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const sessionPath = await createSession(sessionId);
-    const markerPath = getArchivedMarkerPath(sessionId);
-    markerPaths.push(markerPath);
-    await rm(markerPath, { force: true });
 
     const response = await routeContextBonsaiTool(
       "context-bonsai-prune",

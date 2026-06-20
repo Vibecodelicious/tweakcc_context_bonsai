@@ -261,14 +261,12 @@ function isModelTranscriptRow(parsed: Record<string, unknown>): boolean {
 }
 
 // Archival is recorded by the runtime as a TOP-LEVEL `archived` flag on the
-// user/assistant row (see src/lib/compact.ts markMessagesArchived), and the set
-// of archived UUIDs is persisted to the marker file
-// `~/.claude/archived-<sessionId>.json` (addArchivedMarkerEntries), which the
-// archived-filter patch reads to hide those rows from the model-visible
+// user/assistant row (see src/lib/compact.ts markMessagesArchived). The
+// archived-filter patch reads that flag to hide those rows from the model-visible
 // transcript. It is NOT recorded as a per-row `context_bonsai_v2.archived` field
 // — only the anchor row carries `context_bonsai_v2` (the anchor metadata), and
 // the placeholder summary carries `context_bonsai_v2.anchor_id`. Detection here
-// must therefore read the top-level flag and/or the marker file.
+// reads the top-level flag and, for compatibility, marker membership if available.
 function rowUuid(row: Record<string, unknown>): string | undefined {
   return typeof row.uuid === 'string' ? row.uuid : undefined;
 }

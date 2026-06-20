@@ -5,8 +5,7 @@ type Row = Record<string, unknown>;
 
 // Match the REAL runtime archival shape: markMessagesArchived sets a TOP-LEVEL
 // `archived: true` (+ archivedAt/archivedBy) on each user/assistant row in the
-// range (src/lib/compact.ts), and addArchivedMarkerEntries persists the archived
-// UUIDs to ~/.claude/archived-<sessionId>.json. It does NOT set a per-row
+// range (src/lib/compact.ts). It does NOT set a per-row
 // `context_bonsai_v2.archived` field — only the anchor row carries
 // `context_bonsai_v2` (anchor metadata) and the placeholder summary carries
 // `context_bonsai_v2.anchor_id`.
@@ -77,9 +76,9 @@ describe("analyzePruneEffect — model-visible content removal oracle", () => {
     expect(result.rangeVisibleCharsPost).toBe(0);
   });
 
-  test("PASS via marker file: rows lack the top-level flag but are in the marker set", () => {
-    // Some runtime paths/snapshots may not stamp the top-level flag on every row,
-    // but the marker file is the authoritative hide-list the archived-filter reads.
+  test("PASS via compatibility marker: rows rely on marker-set fallback", () => {
+    // Some legacy runtime snapshots may not stamp the top-level flag on every row,
+    // so the analysis can still use marker-set fallback for compatibility.
     const post: Row[] = [
       // Anchor still carries context_bonsai_v2 + summary placeholder anchored to it,
       // but NO top-level `archived` flag here — only the marker set marks the range.

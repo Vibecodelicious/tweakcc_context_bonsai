@@ -3,7 +3,7 @@ import { describe, expect, test, beforeEach, afterEach, mock } from 'bun:test';
 import { mkdir, rm, writeFile, readFile } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { markMessagesArchived, compactSession, getArchivedMarkerPath, unarchiveMessages, retrieveSession } from './compact';
+import { markMessagesArchived, compactSession, unarchiveMessages, retrieveSession } from './compact';
 
 // Create a temp directory for test files
 let testDir: string;
@@ -327,79 +327,6 @@ describe('compactSession', () => {
   });
 });
 
-describe('marker file (archived UUIDs)', () => {
-  test('creates marker file with archived UUIDs on first compaction', async () => {
-    const sessionId = `test-session-${Date.now()}`;
-    const sessionPath = join(testDir, `${sessionId}.jsonl`);
-    const messages = createTestMessages(6, sessionId);
-    await writeTestSession(sessionPath, messages);
-
-    await markMessagesArchived(sessionPath, 'msg-1', 'msg-2', 'summary-uuid-1');
-
-    const markerPath = getArchivedMarkerPath(sessionId);
-    const markerContent = await Bun.file(markerPath).json();
-
-    expect(Array.isArray(markerContent)).toBe(true);
-    expect(markerContent).toContain('msg-1');
-    expect(markerContent).toContain('msg-2');
-    expect(markerContent.length).toBe(2);
-
-    // Cleanup marker file
-    await rm(markerPath, { force: true });
-  });
-
-  test('accumulates UUIDs across multiple compactions', async () => {
-    const sessionId = `test-session-${Date.now()}`;
-    const sessionPath = join(testDir, `${sessionId}.jsonl`);
-    const messages = createTestMessages(10, sessionId);
-    await writeTestSession(sessionPath, messages);
-
-    // First compaction: archive msg-1 and msg-2
-    await markMessagesArchived(sessionPath, 'msg-1', 'msg-2', 'summary-uuid-1');
-
-    const markerPath = getArchivedMarkerPath(sessionId);
-    let markerContent = await Bun.file(markerPath).json();
-    expect(markerContent).toContain('msg-1');
-    expect(markerContent).toContain('msg-2');
-    expect(markerContent.length).toBe(2);
-
-    // Second compaction: archive msg-4 and msg-5
-    await markMessagesArchived(sessionPath, 'msg-4', 'msg-5', 'summary-uuid-2');
-
-    markerContent = await Bun.file(markerPath).json();
-    // Should contain both old and new UUIDs
-    expect(markerContent).toContain('msg-1');
-    expect(markerContent).toContain('msg-2');
-    expect(markerContent).toContain('msg-4');
-    expect(markerContent).toContain('msg-5');
-    expect(markerContent.length).toBe(4);
-
-    // Cleanup marker file
-    await rm(markerPath, { force: true });
-  });
-
-  test('deduplicates UUIDs when same range is compacted twice', async () => {
-    const sessionId = `test-session-${Date.now()}`;
-    const sessionPath = join(testDir, `${sessionId}.jsonl`);
-    const messages = createTestMessages(6, sessionId);
-    await writeTestSession(sessionPath, messages);
-
-    // Compact same range twice (edge case - shouldn't happen but should handle gracefully)
-    await markMessagesArchived(sessionPath, 'msg-1', 'msg-2', 'summary-uuid-1');
-    await markMessagesArchived(sessionPath, 'msg-1', 'msg-2', 'summary-uuid-2');
-
-    const markerPath = getArchivedMarkerPath(sessionId);
-    const markerContent = await Bun.file(markerPath).json();
-
-    // Should not have duplicates
-    expect(markerContent.length).toBe(2);
-    expect(new Set(markerContent).size).toBe(2);
-
-    // Cleanup marker file
-    await rm(markerPath, { force: true });
-  });
-});
-
 describe('unarchiveMessages', () => {
   test('unarchives messages via summary UUID (restores range, removes summary)', async () => {
     const sessionPath = join(testDir, 'session.jsonl');
@@ -688,6 +615,18 @@ describe('retrieveSession', () => {
     let updated = await readSessionFile(sessionPath);
     expect(updated.length).toBe(7); // 6 + summary
 
+    const anchor = updated.find((m: unknown) => (m as { uuid?: string }).uuid === 'msg-1') as {
+      context_bonsai_v2?: unknown;
+    };
+    anchor.context_bonsai_v2 = {
+      archived: true,
+      summary_uuid: compactResult.summaryUuid,
+      range_end_id: 'msg-4',
+      summary: 'summary',
+      index_terms: ['topic'],
+    };
+    await writeTestSession(sessionPath, updated);
+
     // Now retrieve via summary UUID
     const result = await retrieveSession(sessionPath, [compactResult.summaryUuid]);
 
@@ -703,12 +642,10 @@ describe('retrieveSession', () => {
     expect(hasSummary).toBe(false);
 
     // Verify messages are unarchived
-    const msg1 = updated[1] as { archived?: boolean };
+    const msg1 = updated[1] as { archived?: boolean; context_bonsai_v2?: unknown };
     expect(msg1.archived).toBeUndefined();
+    expect(msg1.context_bonsai_v2).toBeUndefined();
 
-    // Cleanup marker file
-    const markerPath = getArchivedMarkerPath(sessionId);
-    await rm(markerPath, { force: true });
   });
 
   test('retrieves individual archived messages', async () => {
@@ -728,8 +665,6 @@ describe('retrieveSession', () => {
     expect(result.summariesRemoved).toEqual([]);
 
     // Cleanup
-    const markerPath = getArchivedMarkerPath(sessionId);
-    await rm(markerPath, { force: true });
   });
 
   test('propagates errors from unarchiveMessages (UUID not found)', async () => {
@@ -754,130 +689,6 @@ describe('retrieveSession', () => {
     ).rejects.toThrow(/not archived: msg-0/);
   });
 
-  test('updates marker file by removing unarchived UUIDs', async () => {
-    const sessionId = `test-session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const sessionPath = join(testDir, `${sessionId}.jsonl`);
-    const messages = createTestMessages(8, sessionId);
-    await writeTestSession(sessionPath, messages);
-
-    const markerPath = getArchivedMarkerPath(sessionId);
-
-    // Compact two separate ranges
-    const compact1 = await compactSession(sessionPath, 'msg-1', 'msg-2', { skipSummary: true });
-    const compact2 = await compactSession(sessionPath, 'msg-4', 'msg-5', { skipSummary: true });
-
-    // Verify marker file has all 4 UUIDs
-    let markerContent = await Bun.file(markerPath).json();
-    expect(markerContent).toContain('msg-1');
-    expect(markerContent).toContain('msg-2');
-    expect(markerContent).toContain('msg-4');
-    expect(markerContent).toContain('msg-5');
-
-    // Retrieve only the first compaction via summary
-    await retrieveSession(sessionPath, [compact1.summaryUuid]);
-
-    // Verify marker file no longer has msg-1 and msg-2, but still has msg-4 and msg-5
-    markerContent = await Bun.file(markerPath).json();
-    expect(markerContent).not.toContain('msg-1');
-    expect(markerContent).not.toContain('msg-2');
-    expect(markerContent).toContain('msg-4');
-    expect(markerContent).toContain('msg-5');
-
-    // Cleanup
-    await rm(markerPath, { force: true });
-  });
-
-  test('preserves empty marker file when all UUIDs removed', async () => {
-    const sessionId = `test-session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const sessionPath = join(testDir, `${sessionId}.jsonl`);
-    const messages = createTestMessages(6, sessionId);
-    await writeTestSession(sessionPath, messages);
-
-    const markerPath = getArchivedMarkerPath(sessionId);
-
-    // Compact
-    const compactResult = await compactSession(sessionPath, 'msg-1', 'msg-2', { skipSummary: true });
-
-    // Verify marker file has UUIDs
-    let markerContent = await Bun.file(markerPath).json();
-    expect(markerContent.length).toBe(2);
-
-    // Retrieve all via summary
-    await retrieveSession(sessionPath, [compactResult.summaryUuid]);
-
-    // Verify marker file is empty array (not deleted, per Decision 3)
-    const markerExists = await Bun.file(markerPath).exists();
-    expect(markerExists).toBe(true);
-
-    markerContent = await Bun.file(markerPath).json();
-    expect(markerContent).toEqual([]);
-
-    // Cleanup
-    await rm(markerPath, { force: true });
-  });
-
-  test('handles missing marker file gracefully during retrieve', async () => {
-    const sessionId = `test-session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const sessionPath = join(testDir, `${sessionId}.jsonl`);
-    const messages = createTestMessages(6, sessionId);
-    await writeTestSession(sessionPath, messages);
-
-    const markerPath = getArchivedMarkerPath(sessionId);
-
-    // Compact
-    const compactResult = await compactSession(sessionPath, 'msg-1', 'msg-2', { skipSummary: true });
-
-    // Remove marker file to simulate edge case
-    await rm(markerPath, { force: true });
-
-    // Retrieve should still work (handles missing file gracefully)
-    const result = await retrieveSession(sessionPath, [compactResult.summaryUuid]);
-
-    expect(result.messageCount).toBe(2);
-
-    // Marker file should be created with empty array
-    const markerContent = await Bun.file(markerPath).json();
-    expect(markerContent).toEqual([]);
-
-    // Cleanup
-    await rm(markerPath, { force: true });
-  });
-
-  test('does not fail retrieve when marker cleanup throws after session mutation', async () => {
-    const sessionId = `test-session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const sessionPath = join(testDir, `${sessionId}.jsonl`);
-    const messages = createTestMessages(6, sessionId);
-    await writeTestSession(sessionPath, messages);
-
-    const compactResult = await compactSession(sessionPath, 'msg-1', 'msg-2', { skipSummary: true });
-
-    const originalWrite = Bun.write;
-    (Bun as unknown as { write: typeof Bun.write }).write = (async (...args: Parameters<typeof Bun.write>) => {
-      const target = String(args[0]);
-      if (target === getArchivedMarkerPath(sessionId)) {
-        throw new Error('simulated marker cleanup failure');
-      }
-      return originalWrite(...args);
-    }) as typeof Bun.write;
-
-    try {
-      const result = await retrieveSession(sessionPath, [compactResult.summaryUuid]);
-      expect(result.messageCount).toBe(2);
-      expect(result.summariesRemoved).toEqual([compactResult.summaryUuid]);
-
-      const updated = await readSessionFile(sessionPath);
-      expect(updated.some((m: unknown) => (m as { type: string }).type === 'summary')).toBe(false);
-      const msg1 = updated.find((m: unknown) => (m as { uuid?: string }).uuid === 'msg-1') as {
-        archived?: boolean;
-      };
-      expect(msg1.archived).toBeUndefined();
-    } finally {
-      (Bun as unknown as { write: typeof Bun.write }).write = originalWrite;
-      const markerPath = getArchivedMarkerPath(sessionId);
-      await rm(markerPath, { force: true });
-    }
-  });
-
   test('returns correct result structure', async () => {
     const sessionId = `test-session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const sessionPath = join(testDir, `${sessionId}.jsonl`);
@@ -898,7 +709,5 @@ describe('retrieveSession', () => {
     expect(Array.isArray(result.summariesRemoved)).toBe(true);
 
     // Cleanup
-    const markerPath = getArchivedMarkerPath(sessionId);
-    await rm(markerPath, { force: true });
   });
 });

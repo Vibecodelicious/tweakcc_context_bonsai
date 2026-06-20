@@ -1,7 +1,5 @@
-import { afterEach, describe, expect, test } from 'bun:test';
-import * as nodeFs from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { describe, expect, test } from 'bun:test';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { BonsaiPatchError } from './types';
@@ -9,14 +7,6 @@ import { bonsaiPatches } from './registry';
 import { archivedFilterPatch } from './archived-filter.patch';
 
 const fixturesDir = join(import.meta.dir, '__fixtures__');
-const sessionId = 'session-1';
-
-let tempDirs: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(tempDirs.map((dir) => rm(dir, { recursive: true, force: true })));
-  tempDirs = [];
-});
 
 describe('archived-filter patch metadata and registry', () => {
   test('exports the Contract A patch identity', () => {
@@ -69,23 +59,32 @@ describe('archived-filter patch application', () => {
     expect(countOccurrences(patched, archivedFilterPatch.sentinel)).toBe(1);
     // The filter block is injected immediately before the `return d("tengu...",...),H.map(...)`
     // statement, so the captured map variable H is filtered before it is mapped.
-    expect(patched).toMatch(/\/\*cb:archived-filter:v1\*\/\{[\s\S]*H=H\.filter\([\s\S]*\}return d\("tengu_api_cache_breakpoints",\{\}\),H\.map\(/);
+    expect(patched).toMatch(/\/\*cb:archived-filter:v1\*\/\{[\s\S]*H=__cbFiltered;[\s\S]*\}return d\("tengu_api_cache_breakpoints",\{\}\),H\.map\(/);
   });
 
-  test('the injected 2.1.156 filter actually removes archived UUIDs when executed', async () => {
-    const configDir = await makeTempDir();
-    await writeFile(join(configDir, `archived-${sessionId}.json`), JSON.stringify(['archived-message']));
-
+  test('the injected 2.1.156 filter actually removes archivedBy spans when executed', () => {
     const source = archivedFilterPatch.apply(testRuntimeBundle2156(), fakePatchContext());
     const factory = new Function('__fs', '__configDir', 'Z9', `${source};return providerMap;`);
-    const providerMap = factory(nodeFs, configDir, { sessionId }) as (
-      messages: Array<{ type: string; uuid: string; message: { content: string } }>,
+    const providerMap = factory(testRuntimeFs(), '/tmp/fake-config', { sessionId: 'session-id' }) as (
+      messages: Array<ArchivedMessage>,
       cache: boolean,
-      ttl: string
+      ttl: string,
     ) => unknown;
 
-    expect(providerMap([message('archived-message', 'archived'), message('active-message', 'active')], false, '5m')).toEqual([
-      { role: 'user', content: 'active' },
+    expect(
+      providerMap(
+        [
+          message('kept-a', 'kept', { type: 'user' }),
+          message('archived-start', 'removed', { type: 'assistant', archived: true, archivedBy: 'summary-1' }),
+          message('archived-end', 'removed', { type: 'user', archived: true, archivedBy: 'summary-1' }),
+          message('kept-b', 'kept', { type: 'assistant' }),
+        ],
+        false,
+        '5m',
+      ),
+    ).toEqual([
+      { role: 'user', content: 'kept' },
+      { role: 'assistant', content: 'kept' },
     ]);
   });
 
@@ -97,76 +96,165 @@ describe('archived-filter patch application', () => {
   });
 });
 
-describe('injected archived UUID filter', () => {
-  test('reads archived marker files and filters matching message UUIDs', async () => {
-    const configDir = await makeTempDir();
-    await writeFile(join(configDir, `archived-${sessionId}.json`), JSON.stringify(['archived-message']));
-    const visibilityPredicate = buildPatchedVisibilityPredicate(configDir);
+describe('injected archived positional filter', () => {
+  test('removes a full archivedBy span from first to last marked index', () => {
+    const visibilityPredicate = buildPatchedVisibilityPredicate();
 
-    expect(visibilityPredicate([message('archived-message', 'archived'), message('active-message', 'active')])).toEqual([
-      { role: 'user', content: 'active' },
+    expect(
+      visibilityPredicate([
+        message('kept-a', 'kept'),
+        message('archived-start', 'removed', { archived: true, archivedBy: 'summary-1', type: 'user' }),
+        message('middle-reminder', 'removed', { type: 'api_system' }),
+        message('archived-end', 'removed', { archived: true, archivedBy: 'summary-1', type: 'assistant' }),
+        message('kept-b', 'kept'),
+      ]),
+    ).toEqual([
+      { role: 'user', content: 'kept' },
+      { role: 'user', content: 'kept' },
     ]);
   });
 
-  test('picks up marker rewrites to another UUID set without forced mtime changes', async () => {
-    const configDir = await makeTempDir();
-    const markerPath = join(configDir, `archived-${sessionId}.json`);
-    await writeFile(markerPath, JSON.stringify(['first-message']));
-    const visibilityPredicate = buildPatchedVisibilityPredicate(configDir);
+  test('handles single-message archived spans', () => {
+    const visibilityPredicate = buildPatchedVisibilityPredicate();
 
-    expect(visibilityPredicate([message('first-message', 'first'), message('second-message', 'second')])).toEqual([
-      { role: 'user', content: 'second' },
-    ]);
-
-    await writeFile(markerPath, JSON.stringify(['second-message']));
-
-    expect(visibilityPredicate([message('first-message', 'first'), message('second-message', 'second')])).toEqual([
-      { role: 'user', content: 'first' },
+    expect(
+      visibilityPredicate([
+        message('kept-a', 'kept'),
+        message('single', 'removed', { archived: true, archivedBy: 'summary-1', type: 'assistant' }),
+        message('kept-b', 'kept'),
+      ]),
+    ).toEqual([
+      { role: 'user', content: 'kept' },
+      { role: 'user', content: 'kept' },
     ]);
   });
 
-  test('picks up marker rewrites to an empty array without forced mtime changes', async () => {
-    const configDir = await makeTempDir();
-    const markerPath = join(configDir, `archived-${sessionId}.json`);
-    await writeFile(markerPath, JSON.stringify(['first-message']));
-    const visibilityPredicate = buildPatchedVisibilityPredicate(configDir);
+  test('removes interior api_system reminders with span boundaries', () => {
+    const visibilityPredicate = buildPatchedVisibilityPredicate();
 
-    expect(visibilityPredicate([message('first-message', 'first'), message('second-message', 'second')])).toEqual([
-      { role: 'user', content: 'second' },
-    ]);
-
-    await writeFile(markerPath, JSON.stringify([]));
-
-    expect(visibilityPredicate([message('first-message', 'first'), message('second-message', 'second')])).toEqual([
-      { role: 'user', content: 'first' },
-      { role: 'user', content: 'second' },
+    expect(
+      visibilityPredicate([
+        message('before', 'kept'),
+        message('archived-start', 'removed', { archived: true, archivedBy: 'summary-1', type: 'assistant' }),
+        message('system-inside', 'removed', { type: 'api_system' }),
+        message('archived-end', 'removed', { archived: true, archivedBy: 'summary-1', type: 'user' }),
+        message('after', 'kept', { type: 'api_system' }),
+        message('after2', 'kept', { type: 'user' }),
+      ]),
+    ).toEqual([
+      { role: 'user', content: 'kept' },
+      { role: 'user', content: 'kept' },
     ]);
   });
 
-  test('fails safe for missing, empty, or corrupt marker files', async () => {
-    const configDir = await makeTempDir();
-    const visibilityPredicate = buildPatchedVisibilityPredicate(configDir);
+  test('repairs orphan api_system boundaries with repeated passes', () => {
+    const visibilityPredicate = buildPatchedVisibilityPredicate();
 
-    expect(visibilityPredicate([message('missing-marker')])).toEqual([{ role: 'user', content: 'visible content' }]);
-
-    const markerPath = join(configDir, `archived-${sessionId}.json`);
-    await writeFile(markerPath, '');
-    expect(visibilityPredicate([message('empty-marker')])).toEqual([{ role: 'user', content: 'visible content' }]);
-
-    await writeFile(markerPath, '{not json');
-    expect(visibilityPredicate([message('corrupt-marker')])).toEqual([{ role: 'user', content: 'visible content' }]);
-
-    await writeFile(markerPath, JSON.stringify({ archived: ['not-an-array'] }));
-    expect(visibilityPredicate([message('non-array-marker')])).toEqual([{ role: 'user', content: 'visible content' }]);
+    expect(
+      visibilityPredicate([
+        message('kept-a', 'kept'),
+        message('archived-start', 'removed', { archived: true, archivedBy: 'summary-1', type: 'user' }),
+        message('archived-end', 'removed', { archived: true, archivedBy: 'summary-1', type: 'user' }),
+        message('orphan-1', 'removed-after', { type: 'api_system' }),
+        message('kept-b', 'kept', { type: 'assistant' }),
+        message('orphan-2', 'removed-after', { type: 'api_system' }),
+        message('kept-c', 'kept', { type: 'user' }),
+      ]),
+    ).toEqual([
+      { role: 'user', content: 'kept' },
+      { role: 'system', content: 'removed-after' },
+      { role: 'assistant', content: 'kept' },
+      { role: 'user', content: 'kept' },
+    ]);
   });
 
-  test('reads the marker through a strict host-wrapper fs that requires an encoding argument', async () => {
-    const configDir = await makeTempDir();
-    await writeFile(join(configDir, `archived-${sessionId}.json`), JSON.stringify(['archived-message']));
-    const visibilityPredicate = buildPatchedVisibilityPredicateWithWrapperFs(configDir);
+  test('repairs cascading orphan api_system reminders until ordering is valid', () => {
+    const visibilityPredicate = buildPatchedVisibilityPredicate();
 
-    expect(visibilityPredicate([message('archived-message', 'archived'), message('active-message', 'active')])).toEqual([
-      { role: 'user', content: 'active' },
+    expect(
+      visibilityPredicate([
+        message('kept-a', 'kept'),
+        message('archived-start', 'removed', { archived: true, archivedBy: 'summary-1', type: 'assistant' }),
+        message('archived-end', 'removed', { archived: true, archivedBy: 'summary-1', type: 'assistant' }),
+        message('orphan-1', 'removed-after', { type: 'api_system' }),
+        message('orphan-2', 'removed-after', { type: 'api_system' }),
+        message('kept-b', 'kept', { type: 'user' }),
+      ]),
+    ).toEqual([
+      { role: 'user', content: 'kept' },
+      { role: 'user', content: 'kept' },
+    ]);
+  });
+
+  test('merges overlapping and touching archived spans deterministically', () => {
+    const visibilityPredicate = buildPatchedVisibilityPredicate();
+
+    expect(
+      visibilityPredicate([
+        message('kept-a', 'kept'),
+        message('a-start', 'removed', { archived: true, archivedBy: 'summary-1', type: 'user' }),
+        message('a-end', 'removed', { archived: true, archivedBy: 'summary-1', type: 'assistant' }),
+        message('b-start', 'removed', { archived: true, archivedBy: 'summary-2', type: 'user' }),
+        message('b-end', 'removed', { archived: true, archivedBy: 'summary-2', type: 'user' }),
+        message('kept-b', 'kept'),
+      ]),
+    ).toEqual([
+      { role: 'user', content: 'kept' },
+      { role: 'user', content: 'kept' },
+    ]);
+  });
+
+  test('keeps multiple disjoint archived spans deterministic without removing gaps', () => {
+    const visibilityPredicate = buildPatchedVisibilityPredicate();
+
+    expect(
+      visibilityPredicate([
+        message('kept-a', 'kept'),
+        message('a-start', 'removed', { archived: true, archivedBy: 'summary-1', type: 'user' }),
+        message('a-end', 'removed', { archived: true, archivedBy: 'summary-1', type: 'assistant' }),
+        message('gap', 'kept'),
+        message('b-start', 'removed', { archived: true, archivedBy: 'summary-2', type: 'user' }),
+        message('b-end', 'removed', { archived: true, archivedBy: 'summary-2', type: 'user' }),
+        message('kept-b', 'kept'),
+      ]),
+    ).toEqual([
+      { role: 'user', content: 'kept' },
+      { role: 'user', content: 'kept' },
+      { role: 'user', content: 'kept' },
+    ]);
+  });
+
+  test('ignores malformed archived marks', () => {
+    const visibilityPredicate = buildPatchedVisibilityPredicate();
+
+    expect(
+      visibilityPredicate([
+        message('kept-a', 'kept'),
+        message('bad-mark', 'kept', { archived: true, archivedBy: '', type: 'user' }),
+        message('bad-type', 'kept', { archived: true, archivedBy: 123 as unknown as string, type: 'user' }),
+        message('kept-b', 'kept'),
+      ]),
+    ).toEqual([
+      { role: 'user', content: 'kept' },
+      { role: 'user', content: 'kept' },
+      { role: 'user', content: 'kept' },
+      { role: 'user', content: 'kept' },
+    ]);
+  });
+
+  test('keeps the list unchanged with no archivedBy marks', () => {
+    const visibilityPredicate = buildPatchedVisibilityPredicate();
+
+    expect(
+      visibilityPredicate([
+        message('a', 'kept', { type: 'assistant' }),
+        message('b', 'kept', { type: 'api_system' }),
+        message('c', 'kept', { type: 'assistant' }),
+      ]),
+    ).toEqual([
+      { role: 'assistant', content: 'kept' },
+      { role: 'system', content: 'kept' },
+      { role: 'assistant', content: 'kept' },
     ]);
   });
 });
@@ -180,38 +268,20 @@ async function fixtureBundle(visibilityFixtureName: string): Promise<string> {
   return `${helpers}\n${visibility}`;
 }
 
-function buildPatchedVisibilityPredicate(configDir: string): (messages: Array<{ type: string; uuid: string; message: { content: string } }>) => unknown {
+type ArchivedMessage = {
+  type: string;
+  uuid: string;
+  message: { content: string };
+  archived?: boolean;
+  archivedBy?: string;
+};
+
+function buildPatchedVisibilityPredicate(): (messages: Array<ArchivedMessage>) => unknown {
   const source = archivedFilterPatch.apply(testRuntimeBundle(), fakePatchContext());
   const factory = new Function('__fs', '__configDir', 'Z9', `${source};return providerMap;`);
-  return factory(nodeFs, configDir, { sessionId }) as (messages: Array<{ type: string; uuid: string; message: { content: string } }>) => unknown;
-}
-
-// Mirrors the Claude Code host fs wrapper: readFileSync dereferences options.encoding,
-// so a call with no second argument throws (the live-binary failure mode this story fixes).
-// A real, separate stub on purpose — __fixtures__/runtime-helpers.fixture.js is wired only
-// into the anchor/fail-closed tests and is not exercised by the injected-filter predicate.
-function createWrapperFs(): {
-  existsSync: (path: string) => boolean;
-  writeFileSync: (path: string, data: unknown) => void;
-  readFileSync: (path: string, options?: { encoding?: BufferEncoding } | BufferEncoding) => string | Buffer;
-} {
-  return {
-    existsSync: () => false,
-    writeFileSync: () => {},
-    readFileSync: (path, options) => {
-      const encoding = typeof options === 'string' ? options : options?.encoding;
-      if (encoding === undefined) {
-        throw new TypeError("undefined is not an object (evaluating 'options.encoding')");
-      }
-      return nodeFs.readFileSync(path, encoding);
-    },
-  };
-}
-
-function buildPatchedVisibilityPredicateWithWrapperFs(configDir: string): (messages: Array<{ type: string; uuid: string; message: { content: string } }>) => unknown {
-  const source = archivedFilterPatch.apply(testRuntimeBundle(), fakePatchContext());
-  const factory = new Function('__fs', '__configDir', 'Z9', `${source};return providerMap;`);
-  return factory(createWrapperFs(), configDir, { sessionId }) as (messages: Array<{ type: string; uuid: string; message: { content: string } }>) => unknown;
+  return factory(testRuntimeFs(), '/tmp/fake-config', { sessionId: 'session-id' }) as (
+    messages: Array<ArchivedMessage>,
+  ) => unknown;
 }
 
 function testRuntimeBundle(): string {
@@ -256,14 +326,34 @@ function fakePatchContext() {
   };
 }
 
-function message(uuid: string, content = 'visible content'): { type: string; uuid: string; message: { content: string } } {
-  return { type: 'user', uuid, message: { content } };
+function message(
+  uuid: string,
+  content = 'visible content',
+  {
+    type = 'user',
+    archived = false,
+    archivedBy,
+  }: {
+    type?: string;
+    archived?: boolean;
+    archivedBy?: string;
+  } = {},
+): ArchivedMessage {
+  return {
+    type,
+    uuid,
+    message: { content },
+    ...(archived ? { archived } : {}),
+    ...(archivedBy !== undefined ? { archivedBy } : {}),
+  };
 }
 
-async function makeTempDir(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'cbonsai-archived-filter-'));
-  tempDirs.push(dir);
-  return dir;
+function testRuntimeFs() {
+  return {
+    existsSync: () => false,
+    writeFileSync: () => {},
+    readFileSync: () => '',
+  };
 }
 
 function countOccurrences(content: string, needle: string): number {

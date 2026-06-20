@@ -1,9 +1,7 @@
 // compact.ts - Core compaction logic for session context compression
 import { createReadStream, createWriteStream } from 'fs';
 import { createInterface } from 'readline';
-import { rename, unlink, mkdir } from 'fs/promises';
-import { homedir } from 'os';
-import { basename, join } from 'path';
+import { rename, unlink } from 'fs/promises';
 import type { SessionMessage, SummaryMessage, CompactMetadata } from '../types';
 import { getMessageRange } from './session';
 import { generateSummary } from './summarize';
@@ -49,97 +47,6 @@ export interface MarkArchivedResult {
  */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Extracts session ID from a session JSONL file path.
- * Example: "~/.claude/projects/-home-user-myproject/abc-123.jsonl" -> "abc-123"
- */
-function extractSessionId(sessionPath: string): string {
-  const fileName = basename(sessionPath);
-  if (!fileName.endsWith('.jsonl')) {
-    throw new Error(`Invalid session path: expected .jsonl extension: ${sessionPath}`);
-  }
-  return fileName.slice(0, -6); // Remove ".jsonl" suffix
-}
-
-/**
- * Returns the path to the archived UUIDs marker file.
- * This file is read by the tweakcc archivedFilter patch to filter messages
- * in Claude Code's in-memory array after compact_context runs.
- *
- * @param sessionId - The session UUID
- * @returns Path to ~/.claude/archived-<sessionId>.json
- */
-export function getArchivedMarkerPath(sessionId: string): string {
-  return join(homedir(), '.claude', `archived-${sessionId}.json`);
-}
-
-/**
- * Writes a marker file containing the list of archived message UUIDs.
- * This enables the archivedFilter patch to filter these messages from
- * Claude Code's in-memory message array immediately after compact.
- *
- * @param sessionId - The session UUID
- * @param archivedUuids - Array of archived message UUIDs
- */
-async function writeArchivedMarker(
-  sessionId: string,
-  archivedUuids: string[]
-): Promise<void> {
-  const markerPath = getArchivedMarkerPath(sessionId);
-
-  // Ensure .claude directory exists
-  await mkdir(join(homedir(), '.claude'), { recursive: true });
-
-  // Read existing UUIDs and merge with new ones to preserve across multiple compactions
-  const existing: string[] = await Bun.file(markerPath).json().catch(() => []);
-  const combined = [...new Set([...existing, ...archivedUuids])];
-
-  // Write marker file with merged archived UUIDs
-  await Bun.write(markerPath, JSON.stringify(combined));
-}
-
-export async function addArchivedMarkerEntries(
-  sessionPath: string,
-  archivedUuids: string[]
-): Promise<void> {
-  if (archivedUuids.length === 0) {
-    return;
-  }
-
-  const sessionId = extractSessionId(sessionPath);
-  await writeArchivedMarker(sessionId, archivedUuids);
-}
-
-/**
- * Removes specified UUIDs from the archived marker file.
- * This is called during retrieve operations to unmark messages that are
- * being restored to active context.
- *
- * Per Decision 3 in the retrieve plan, empty marker files are preserved
- * (write `[]`) to maintain consistency with the compaction workflow.
- *
- * @param sessionId - The session UUID
- * @param uuidsToRemove - Array of UUIDs to remove from the marker file
- */
-async function removeFromArchivedMarker(
-  sessionId: string,
-  uuidsToRemove: string[]
-): Promise<void> {
-  const markerPath = getArchivedMarkerPath(sessionId);
-
-  // Read existing UUIDs (or empty array if file is missing)
-  const existing: string[] = await Bun.file(markerPath).json().catch(() => []);
-
-  // Create a Set for efficient lookup
-  const removeSet = new Set(uuidsToRemove);
-
-  // Filter out the UUIDs being unarchived
-  const remaining = existing.filter((uuid) => !removeSet.has(uuid));
-
-  // Write updated array back (preserve empty file as [] per Decision 3)
-  await Bun.write(markerPath, JSON.stringify(remaining));
 }
 
 /**
@@ -321,9 +228,6 @@ export async function markMessagesArchived(
   // Write session file atomically (unless skipWrite is set)
   if (!options?.skipWrite) {
     await writeJsonlAtomic(sessionPath, allMessages);
-
-    // Write marker file only after session write succeeds
-    await addArchivedMarkerEntries(sessionPath, Array.from(archiveUuids));
   }
 
   return {
@@ -410,16 +314,6 @@ export async function compactSession(
 
   // Write atomically with retry
   await writeJsonlAtomic(sessionPath, allMessages);
-
-  // Keep marker in sync with newly archived messages (best-effort).
-  const archivedUuids = messages
-    .filter((message) => message.type === 'user' || message.type === 'assistant')
-    .map((message) => message.uuid);
-  try {
-    await addArchivedMarkerEntries(sessionPath, archivedUuids);
-  } catch {
-    // Marker sync failure must not report an error after session mutation.
-  }
 
   return {
     messageCount,
@@ -621,6 +515,7 @@ export async function unarchiveMessages(
   // Step 5 — Mutate in-memory
   const outputMessages: SessionMessage[] = [];
   const unarchivedMessages: SessionMessage[] = [];
+  const retrievedSummaryUuids = new Set(summariesRemoved);
 
   for (let i = 0; i < allMessages.length; i++) {
     if (summaryRemovalSet.has(i)) {
@@ -639,12 +534,34 @@ export async function unarchiveMessages(
         delete unarchived.archived;
         delete unarchived.archivedAt;
         delete unarchived.archivedBy;
+        const restored = unarchived as SessionMessage & { context_bonsai_v2?: { summary_uuid?: string } };
+        if (
+          restored.context_bonsai_v2 &&
+          typeof restored.context_bonsai_v2.summary_uuid === 'string' &&
+          retrievedSummaryUuids.has(restored.context_bonsai_v2.summary_uuid)
+        ) {
+          delete restored.context_bonsai_v2;
+        }
       }
       outputMessages.push(unarchived as SessionMessage);
       unarchivedMessages.push(unarchived as SessionMessage);
     } else {
       const message = allMessages[i];
       if (message) {
+        if (retrievedSummaryUuids.size > 0) {
+          const restored = { ...message } as SessionMessage & {
+            context_bonsai_v2?: { summary_uuid?: string };
+          };
+          if (
+            restored.context_bonsai_v2 &&
+            typeof restored.context_bonsai_v2.summary_uuid === 'string' &&
+            retrievedSummaryUuids.has(restored.context_bonsai_v2.summary_uuid)
+          ) {
+            delete restored.context_bonsai_v2;
+            outputMessages.push(restored as SessionMessage);
+            continue;
+          }
+        }
         outputMessages.push(message);
       }
     }
@@ -662,7 +579,7 @@ export async function unarchiveMessages(
 
 /**
  * Retrieves (unarchives) messages by their UUIDs. This is the high-level orchestration
- * function that combines unarchiving with marker file updates.
+ * function for unarchiving and result shaping.
  *
  * Pass archived message UUIDs to restore individual messages, or summary UUIDs to
  * restore all messages from that summary (and remove the summary).
@@ -679,11 +596,7 @@ export async function retrieveSession(
   // Step 1: Call unarchiveMessages with the IDs array
   const unarchiveResult = await unarchiveMessages(sessionPath, ids);
 
-  // Step 2: Extract session ID from session path
-  const sessionId = extractSessionId(sessionPath);
-
-  // Step 3: Collect unarchived message UUIDs only (user/assistant, NOT summary UUIDs)
-  // Summary UUIDs are never in the marker file
+  // Step 2: Collect unarchived message UUIDs only (user/assistant; exclude summary UUIDs)
   const unarchivedUuids: string[] = [];
   for (const msg of unarchiveResult.messages) {
     if (msg.type === 'user' || msg.type === 'assistant') {
@@ -691,14 +604,7 @@ export async function retrieveSession(
     }
   }
 
-  // Step 4: Update marker file to remove unarchived UUIDs (best-effort).
-  try {
-    await removeFromArchivedMarker(sessionId, unarchivedUuids);
-  } catch {
-    // Marker cleanup failure must not report an error after session mutation.
-  }
-
-  // Step 5: Return complete result
+  // Step 3b: Return complete result
   return {
     messageCount: unarchiveResult.messageCount,
     ids: unarchivedUuids,
