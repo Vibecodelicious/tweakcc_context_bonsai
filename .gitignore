@@ -27,3 +27,6 @@ Thumbs.db
 
 # Claude snapshots (managed by the tool itself)
 .claude-snapshots/
+
+# Top-layer showrunner hand-off (session-operational, deliberately untracked)
+SHOWRUNNER_HANDOFF.md
