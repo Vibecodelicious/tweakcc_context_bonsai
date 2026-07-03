@@ -230,6 +230,20 @@ function tokenUsageScorer(_content: string, candidate: Candidate): number {
   if (/\b(?:cacheReadInputTokens|cacheCreationInputTokens|outputTokens)\b/.test(candidate.text)) score += 12;
   if (/\breturn\b/.test(candidate.text)) score += 5;
   if (/\b(?:percent|Math\.round|Math\.ceil|Math\.floor)\b/.test(candidate.text)) score -= 10;
+  // 2.1.200 re-derivation (docs/semantic-anchor-analysis-2.1.200.md,
+  // context-bonsai-gauge.token-usage): the per-request usage ACCUMULATOR and the
+  // aggregate usage-DISPLAY formatter share the same zero-initialized usage record
+  // literal (`{inputTokens:0,outputTokens:0,cacheReadInputTokens:0,...,contextWindow:0,
+  // maxOutputTokens:0}`), tying at 52 vs 47 and fail-closing on minMargin 10. The
+  // discriminator is behavioral and lives inside the captured text (the greedy match
+  // ends at the record literal's `}`): the accumulator's defining entry behavior is
+  // "load the running record for this model or initialize a fresh zero record" —
+  // `<lookup>(n)??{inputTokens:0,...}` (2.1.200 `a6p(e,t,n)`; the exact 2.1.156 `Wu5`
+  // shape) — whereas the display formatter's captured text builds a human-readable
+  // `"Usage:"` string (2.1.200 `o6p()`) before its first record literal. Neither
+  // signal weakens minScore/minMargin; both are grounded in host behavior, not names.
+  if (/\?\?\s*\{[^{}]*\binputTokens\s*:\s*0/.test(candidate.text)) score += 15;
+  if (/["'`]Usage[:\s]/.test(candidate.text)) score -= 25;
   return score;
 }
 

@@ -389,6 +389,82 @@ describe("failure result shape (Defect B) — deterministic failures carry isErr
   });
 });
 
+// E2E-05 / Behavioral Constraint 10: deterministic fail-closed compatibility paths.
+// Both a missing session JSONL and a schema/JSON-drifted (unparseable non-final line)
+// session must fail closed with isError:true, carry the deterministic compatibility
+// error, and mutate nothing. COMPATIBILITY_ERROR is module-private in index.ts; the
+// literal is asserted directly to avoid an otherwise-unneeded source export.
+const COMPATIBILITY_ERROR = "Compatibility error: unable to access active session.";
+
+describe("E2E-05 compatibility fail-closed paths (Behavioral Constraint 10)", () => {
+  test("prune on a missing session JSONL returns isError:true, compatibility error, creates no file", async () => {
+    testDir = join(tmpdir(), `mcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(testDir, { recursive: true });
+    const sessionPath = join(testDir, "missing-session.jsonl");
+    expect(await Bun.file(sessionPath).exists()).toBe(false);
+
+    const response = await routeContextBonsaiTool(
+      "context-bonsai-prune",
+      {
+        from_pattern: "start",
+        to_pattern: "end",
+        summary: "summary",
+        index_terms: ["topic"],
+      },
+      {
+        discoverSessionPath: async () => sessionPath,
+        assertArchivedFilterPatchPresent: async () => true,
+      }
+    );
+
+    expect(response.isError).toBe(true);
+    expect(response.content[0]?.text).toBe(COMPATIBILITY_ERROR);
+    // No mutation: the session file was never created.
+    expect(await Bun.file(sessionPath).exists()).toBe(false);
+  });
+
+  test("prune on a session JSONL with a malformed non-final line returns isError:true and leaves bytes unchanged", async () => {
+    testDir = join(tmpdir(), `mcp-server-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(testDir, { recursive: true });
+    const sessionId = `test-session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const sessionPath = join(testDir, `${sessionId}.jsonl`);
+    // A corrupt NON-final line (JSON/schema drift) followed by a valid line: the
+    // reader throws corruption on the non-final line before any mutation happens.
+    const corrupt =
+      '{"type":"user","uuid":"msg-1",BROKEN\n' +
+      JSON.stringify({
+        type: "assistant",
+        uuid: "msg-2",
+        message: { role: "assistant", content: [{ type: "text", text: "end" }] },
+        timestamp: new Date().toISOString(),
+        parentUuid: "msg-1",
+        sessionId,
+      }) +
+      "\n";
+    await writeFile(sessionPath, corrupt, "utf-8");
+    const before = await Bun.file(sessionPath).text();
+
+    const response = await routeContextBonsaiTool(
+      "context-bonsai-prune",
+      {
+        from_pattern: "start",
+        to_pattern: "end",
+        summary: "summary",
+        index_terms: ["topic"],
+      },
+      {
+        discoverSessionPath: async () => sessionPath,
+        assertArchivedFilterPatchPresent: async () => true,
+      }
+    );
+
+    expect(response.isError).toBe(true);
+    expect(response.content[0]?.text).toBe(COMPATIBILITY_ERROR);
+    // No mutation: file bytes unchanged.
+    expect(await Bun.file(sessionPath).text()).toBe(before);
+  });
+});
+
 describe("prune call filtering", () => {
   test("resolves to one non-wrapper candidate among wrapper candidates", () => {
     const messages = [
@@ -780,7 +856,7 @@ describe("discovery layer — running-binary identification", () => {
   }
 
   test("shape 1: direct native version-named binary, no --resume → resolves to that binary", async () => {
-    const nativeBinary = "/home/op/.local/share/claude/versions/2.1.156";
+    const nativeBinary = "/home/op/.local/share/claude/versions/2.1.200";
     const tree: Record<string, SyntheticProcess> = {
       // bun run mcp-server/index.ts (bun does not exec-replace)
       [mcpPid]: { ppid: "5000", argv: [bunExe, "run", "mcp-server/index.ts"], exe: bunExe },
