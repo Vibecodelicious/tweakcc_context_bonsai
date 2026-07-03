@@ -12,16 +12,19 @@ Making Context Bonsai self-maintain across all its harness implementations (the 
 
 ## Immediate next action
 
-**Generate and validate the Claude Code forward-port cycle plan on the Fable tier**, per the parent repo's `docs/agent-specs/forward-port-spec.md` (§1 core, §3 closed-artifact shape, §4.3 Claude Code slot — fully bound). The unit:
+**Run the first Opus-4.8-low calibration execution of the staged cycle plan.** The plan is `.agents/plans/story-rebase-cycle-f92dfac9c5daecc286e03b90ef20bb930cf68818.md` (this repo), committed at `40d9233` — read it before launching; its Execution-mode rule, phases, and validation loop history are the contract. Generation already executed the freeze for real: the 2.1.200 platform binary, extracted bundle, and manifest sit under `/tmp/cc-bonsai-artifacts/claude-code/2.1.200/` with checksums recorded in the plan (live `claude` install untouched — keep it that way). Basil was slacked 2026-07-03 about the plan's §1.15 loop closing at the 3-iteration cap; his override supersedes the recorded approval if he sends one.
 
-1. Read the spec sections above plus `docs/agent-specs/claude-code-context-bonsai-spec.md` (behavioral constraints the plan must not lose — message-ordering rules especially). Reading parent docs is allowed; editing them is not (constraint 1: run-5 pause).
-2. Freeze the upstream target per §3.1/§4.3: npm identity resolved once at freeze time; artifact and manifest work under `/tmp/cc-bonsai-artifacts/…`, never in a repo tree.
-3. Generate the plan; close the spec's §1.15 validation loop (missing-details + ambiguity reviewers on cheaper models, inspecting the real repos), plus the owner-required **source-truth coverage review**: every ordering-related rule in the Claude Code spec accounted for in the plan — none paraphrased into vagueness, none silently dropped (constraint 2: spec subtleties). Quality bar: the OpenCode Fable-tier plan at parent commit `37ed76c` (§1.15 closed at iteration 1, zero blocking findings).
-4. Stage the plan and validation artifacts in THIS repo's `.agents/plans/`, explicitly marked staged-for-parent; the move to the parent's `.agents/plans/` waits for run-5 exit (constraint 1: run-5 pause).
+The unit:
 
-Resolve in generation, not at execution: (a) `SOURCE_HEAD_SHA` churn — the relay commits hand-off docs to this repo's `main` every session, so pin the generation-time SHA and scope the drift handling so docs-only hand-off commits don't false-STOP; (b) ~44 releases of drift means anchor re-verification (`patches/anchors.ts`) dominates the cycle; (c) no installation-e2e instance has ever been recorded for any harness — §4.2 flag-don't-invent: flag the missing binding, never invent commands; (d) **never upgrade or patch the live installed `claude` CLI this chain runs on** — target-version work happens against downloaded artifacts under `/tmp` unless the owner explicitly sanctions touching the live install.
+1. Provision a scratch clone: `git clone /home/basil/projects/context-bonsai-agents/tweakcc_context_bonsai /tmp/cc-cal-run-1` (bump the suffix per run; never point the executor at the real side repo).
+2. Spawn the executor — Agent tool, model `opus`, effort `low` — with a launch prompt that states `CALIBRATION` mode and the scratch root explicitly (the plan STOPs without it), names the plan path inside the clone, and instructs execution of Phases 0–7 and 9 exactly as bound. Runs are serial: the `/tmp` artifacts are shared.
+3. Observe without contaminating (no hints, no fixes mid-run; ≤30-min wake-and-verify per intent rule 4). Live-e2e scenarios needing sign-in may come back `BLOCKED` per-scenario — that is data, not failure.
+4. After the run: attribute every stumble `SPEC-GAP` vs `EXECUTOR-FAIL`, fix SPEC-GAPs in the plan/artifacts on the Fable tier, and re-run with a fresh scratch clone. The bar is repeated clean executions, not one pass. Record run verdicts in this file's State section as they accumulate; park-and-slack only for genuine owner decisions the recorded intent does not cover.
 
-After the plan is approved: subsequent units run Opus-4.8-low calibration executions under the attribution discipline; park-and-slack only for genuine owner decisions the recorded intent does not cover.
+## State
+
+- 2026-07-03: HAND_OFF resealed (owner instruction; archive at `HAND_OFF_ARCHIVE_2026-07-03.md`). Cycle plan generated on the Fable tier, §1.15-validated (3 iterations, 7 blocking findings all fixed and none recurring, iteration-3 fixes mechanically verified; source-truth coverage review clean), staged and committed at `40d9233`. Anchor reality after 44 releases of drift: 7 of 8 anchors still select; `context-bonsai-gauge.token-usage` fails closed on a 52-vs-47 margin ambiguity — its semantic re-derivation is bound in the plan as the one expected `updated_anchor`.
+- Calibration runs completed: none yet.
 
 ## Hard constraints and intent rules (from the owner, via direct conversation or the watchdog — Basil's top-layer supervising session; see Showrunner expectations at the end)
 
