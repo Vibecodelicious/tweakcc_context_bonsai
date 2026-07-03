@@ -12,9 +12,13 @@ Keep this file updated as work progresses (read `/home/basil/projects/context-bo
 
 Developing the Context Bonsai **meta-loop**: the machinery that keeps every harness port current as harnesses release new versions, and that can derive a port for a harness it has never seen. Basil calls the current activity the outer-outer loop — developing the loops themselves. The authoritative direction statement is **`docs/meta-loop-direction.md`** (parent repo).
 
-## State as of 2026-07-03 ~04:15 UTC
+## State as of 2026-07-03 ~03:40 UTC (post-launch)
 
-**The post-run-3 owner sequence is complete.** Three parent commits this session:
+**PILOT RUN 4 IS LIVE**: launched 03:36 UTC in tmux window `bonsai:@4` (`gpt55-pilot-run4`), orchestrator PID 1863670, run log `.agents/pilot/gpt55-v1.17.13-run.log` (tee includes the exit marker — plumbing dry-run-verified). The watchdog chose branch 1 (run 4, unchanged terms) with the owner slacked and the override window explicitly waived ("launch it, window's yours to hold"). Decision + launch prep at `da89bd8`: residue archived to `.agents/pilot/archive/run3-v1.17.13/`, 429-self-resume expectation in `launch-run.sh`, fresh observer log armed with the eight-gap recurrence checklist. First wake-and-verify passed: the executor found `docs/opencode-e2e-runbook.md` via §4.2 immediately.
+
+**Your job is observation** (intent rules 4 and 6): wake-and-verify every ≤30 minutes — process alive (`pgrep -af 'opencode run --agent bonsai-orchestrator'`), run log growing, or the silence explained. A silent stall with the process alive is EXPECTED if the provider 429s: check the newest `~/.local/share/opencode/log/*.log` for `session.processor` errors; the session self-resumes at the retry-after horizon (run-3 precedent) — verify self-resume before considering any injection, and injection needs watchdog sanction. Watch for `PILOT-PROCESS-EXITED` in the run log; on exit, run the post-run sequence runs 2–3 followed (observer log verdicts + acceptance assessment → commit records → owner review of any §1.16 edit → direction iteration → slack). Verdicts go in the observer log as stumbles appear; touch nothing the executor reads.
+
+**The post-run-3 owner sequence is complete.** Three parent commits from the preceding work unit:
 
 - `15c0463` — owner review of the run-3 §1.16 maintenance edit: **adopted as written** (the flag-don't-invent rule extends the spec's existing fail-closed principle to partially-bound slots; complementary to, not conflicting with, the direction doc's §1.15-refinement step). The four run-3 record files were untracked in the same commit per the `3aaea2f` precedent (history keeps them at `bddcf96`; they remain on disk, gitignored).
 - `2f8495a` — **verdicts V2/V3 closed**: new `docs/opencode-e2e-runbook.md` binds the concrete OpenCode commands for both the runtime e2e (Protocols A/B) and the pre-publish install gate. Every command carries an EXECUTED / SOURCE-VERIFIED / COMPOSED grounding mark; composed sequences first run at the next cycle's gates, and a composed-command failure is a finding against the runbook, not license to improvise. §4.2 now cites the runbook and carries the durable flag-don't-invent rule. Authored under the writing-guidance loop (2 iterations, 4 reviewer passes, 11 findings fixed) with final mechanical verification of every code block.
@@ -61,9 +65,4 @@ Both scripts require running inside a tmux pane and fail loudly otherwise. If yo
 
 ## Immediate next action
 
-**Wait for the run-4 decision, then execute it.** Concretely, for the session that picks this up after the decision lands:
-
-1. Record the decision (with provenance: Basil or watchdog) in `docs/meta-loop-direction.md`'s Next Step Decision-status line, superseding "open" — commit it (the `565af44` pattern).
-2. If branch 1 (run 4 unchanged terms): execute the three launch-prep items in the direction doc's Next Step (residue archive-and-clear; observation protocol carry-over; acceptance test framed), then launch per the run-3 procedure (`565af44`'s launch prep and `.agents/pilot/launch-run.sh`) and observe per intent rules 4 and 6.
-3. If branch 2 or an owner override: the direction doc's Next Step gets rewritten first (branch 2 amends the End Goal's tiering paragraph — owner approval is part of the decision itself), then re-derive launch prep from the new terms.
-4. Either way: slack Basil at each state change (verify `ok`); relay or stop per the relay rules.
+**Observe run 4** per the State section's protocol: ≤30-minute wake-and-verify sweeps until `PILOT-PROCESS-EXITED` appears in the run log; record milestones and verdicts in the observer log as they occur; keep sessions short by relaying between sweeps when a session grows long (the credit economy), or hold a background timer within one session. On exit: post-run sequence (verdicts + acceptance assessment against the eight-gap checklist in the observer log → commit the four records mirroring `bddcf96` → owner review of any uncommitted §1.16 Part-4 edit → iterate the direction doc → slack Basil, verify `ok`). The isolated capability question this run answers is stated in the observer log's header; a seal, a clean EXECUTOR-FAIL, and an explicit early missing-binding STOP are all unconfounded outcomes — do not rescue any of them.
