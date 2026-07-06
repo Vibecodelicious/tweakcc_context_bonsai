@@ -76,10 +76,14 @@ Expected pre-flight result:
 
 If a required dependency is unavailable, classify the run as `BLOCKED`.
 
+## Drive Discipline
+
+Every `claude --resume <session-id>` / `claude -r <session-id>` drive must run from the session's own project directory (the scratch dir the session was started in). Claude Code resolves sessions per project-hashed cwd; a wrong-cwd resume fails with a misleading `No conversation found with session ID` and empty output, which can masquerade as an unchanged-session result. (Recurred as an executor slip in the 2.1.201 calibration runs 1 and 3.)
+
 ## Evidence Sources
 
 - Live JSONL: `~/.claude/projects/<project-hash>/<session-id>.jsonl` (read after each turn).
-- Archive marker file: `~/.claude/archived-<session-id>.json` (written by `addArchivedMarkerEntries`).
+- Archival state, by build shape. In the embedded-archival shape (the native 2.1.20x builds under test), archival state lives directly in the session JSONL: archived rows carry a top-level `archived` flag — this is what the `prune-effect`/`protocol-a-oracle` harnesses read (`isArchivedRow` in `e2e/native-e2e.ts`) — and only the anchor row carries `context_bonsai_v2` with `archived: true` in its anchor metadata (the placeholder summary entry carries `context_bonsai_v2.anchor_id`, not an `archived` field). No marker file is ever written in this shape; its absence is not a failure. In the marker-file shape, `addArchivedMarkerEntries` writes `~/.claude/archived-<session-id>.json`. Determine the shape of the build under test before collecting evidence; where a scenario's evidence-collection block below reads `~/.claude/archived-$SESSION_ID.json`, in the embedded-archival shape substitute extracting the top-level-`archived` rows from the session JSONL, and translate marker-file `Look for` / verdict items to the embedded flags — e.g. E2E-01's FAIL branch "marker file missing" reads as "no session-JSONL row carries the top-level `archived: true` flag". (Surfaced in 2.1.201 calibration run 1.)
 - Tool-response stdout from MCP (visible in Claude Code's transcript as `tool_result` blocks).
 - Optional: tweakcc UI capture (TUI screenshot or `script(1)` log) if patches applied.
 - Pinned-target artifact evidence: the frozen native `2.1.201` `extracted.js` + `manifest.json` (stored out-of-repo under `/tmp/cc-bonsai-artifacts/claude-code/2.1.201/native/` per the Evidence Retention Policy; pass via `--bundle`/`--manifest`), and the run's evidence JSON.
@@ -94,9 +98,9 @@ The archived-filter and the host's internal→provider mapping run only at reque
 1. Run a local forwarding proxy: a plain-HTTP server that records each request body and upstream status, then forwards to `https://api.anthropic.com` using the request's own headers. There is **no TLS interception** — the binary→proxy hop is plain HTTP via `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`; the proxy→API hop is an ordinary outbound TLS `fetch`. (Verify the proxy works with a throwaway request before trusting it: a forwarded `/healthz` returns the real API's `404`.)
 2. Launch the patched binary against it on the session under test: `ANTHROPIC_BASE_URL=http://127.0.0.1:<port> claude -r <session-id>`. The captured `/v1/messages` body is the real provider transcript.
 
-**Always verify the capture actually filtered before reasoning from it.** A capture is valid only if filtering occurred: confirm an archived-only sentinel string is absent from the request body and that the provider message count dropped versus the unfiltered transcript. If archived content is still present, the capture is invalid — discard it. The filter reads `~/.claude/archived-<session-id>.json` for the running session (path built from `sessionIdFunc()` in `archived-filter.patch.ts`), so a captured request with no filtering means the marker the runtime looked for was not the one you wrote.
+**Always verify the capture actually filtered before reasoning from it.** A capture is valid only if filtering occurred: confirm an archived-only sentinel string is absent from the request body and that the provider message count dropped versus the unfiltered transcript. If archived content is still present, the capture is invalid — discard it. In the embedded-archival shape, the injected filter matches the embedded flags on the message rows themselves (`archived` plus `archivedBy` — see `archived-filter.patch.ts`), so a captured request with no filtering means the rows you archived do not carry those flags in the transcript the runtime loaded. In the marker-file shape, the filter reads `~/.claude/archived-<session-id>.json` for the running session (path built from `sessionIdFunc()`), so an unfiltered capture means the marker the runtime looked for was not the one you wrote.
 
-To test a fix against the real ordering rule rather than a model of it, save the binary's auth headers from one captured request and replay hand-edited variants of the array (e.g. one that strands a system reminder vs. one that does not) directly to `/v1/messages`; the API's `200`/`400` is the oracle. The marker file is the lever for binary-driven variants — adding/removing UUIDs is exactly what a widen/narrow fix does. Capture artifacts live out-of-repo (e.g. under `/tmp/`) and are never committed.
+To test a fix against the real ordering rule rather than a model of it, save the binary's auth headers from one captured request and replay hand-edited variants of the array (e.g. one that strands a system reminder vs. one that does not) directly to `/v1/messages`; the API's `200`/`400` is the oracle. In the marker-file shape, the marker file is the lever for binary-driven variants (in the embedded shape, edit the rows' `archived`/`archivedBy` flags instead) — adding/removing UUIDs is exactly what a widen/narrow fix does. Capture artifacts live out-of-repo (e.g. under `/tmp/`) and are never committed.
 
 ## Scenarios
 
@@ -212,7 +216,7 @@ Look for:
 **Execution:**
 
 1. Drive ~10 turns where multiple turns contain a substring like "shared phrase".
-2. Ask Claude to prune from "shared phrase" to "any subsequent boundary".
+2. Drive the prune with the **bound ambiguity driver**: a plain natural-language prune request does not reliably reach the ambiguity path — the driven model autonomously refines the boundary to a unique substring and the prune succeeds (observed in the 2.1.201 calibration run 3 and REAL-CYCLE). Instruct the model explicitly that it must invoke `context-bonsai-prune` with the literal bare `from_pattern` exactly as given (the seeded shared substring, e.g. `from_pattern="shared phrase"`), must not refine or extend the pattern, and must paste the tool's verbatim output.
 3. Verify Claude receives an ambiguity error and the JSONL is unchanged.
 4. (Adversarial) Drive a second prune attempt where the prior failed prune call's `from_pattern` text would create a wrapper-collision. Verify the prune-wrapper filter excludes that wrapper from the candidate set.
 
@@ -355,7 +359,7 @@ Look for:
 
 1. Note the session id and the archive marker file path.
 2. Exit Claude Code.
-3. Resume: `claude --resume <session-id>`.
+3. Resume: `claude --resume <session-id>`, from the session's own project directory (see Drive Discipline).
 4. Reference pre-prune content; verify the placeholder summary is what's visible (not the original blocks).
 5. Optionally retrieve to verify retrieve still works post-resume.
 
