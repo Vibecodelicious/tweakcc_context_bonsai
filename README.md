@@ -49,6 +49,19 @@ cd /absolute/path/to/tweakcc_context_bonsai
 bun run apply
 ```
 
+These patches are certified against Claude Code `2.1.201`. Apply fails closed on
+other versions: each patch verifies its sentinel appears exactly once in the
+target runtime, and aborts (restoring any backup) if the bundled files do not
+match. If apply reports a sentinel mismatch, rerun against a matching Claude Code
+build or check this repo for an updated port.
+
+For a nonstandard install location or an explicit backup directory, pass the
+paths through:
+
+```sh
+bun run apply -- --path <install> --backup <backup-dir>
+```
+
 To restore Claude Code's original runtime files later:
 
 ```sh
