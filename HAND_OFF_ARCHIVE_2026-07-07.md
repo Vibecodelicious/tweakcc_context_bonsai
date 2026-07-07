@@ -30,3 +30,12 @@ Zero EXECUTOR-FAILs across stories 2–5 (Story 1's were self-corrected); tierin
 
 - Zero-credential real-entry-point evidence: stub OpenAI-compatible server (`model.provider: custom` + local `base_url` + `model.context_length` pinned) drives the genuine conversation loop; stub-recorded request payloads are the model-visible-context evidence channel.
 - Shell-wedge symptom (every Bash exits 1, empty) = /tmp quota full; recover with `dangerouslyDisableSandbox` Bash.
+
+## Stage 6 acceptance-gate calibration runs (2026-07-07, closing unit — Hermes derivation COMPLETE)
+
+Plan: `.agents/plans/story-rebase-cycle-39c6bac3f1c3226b415347881b27245df3c4a500.md`, `uncommitted-pressure-test` mode vs v2026.7.1. Executor: Opus 4.8 low via Workflow single-agent call.
+
+- **Run 1 (STOPped mid-Phase-6, dispositioned)**: phases 0–5 all green (91/91 pytest, ruff clean, 8/8 matrix, clean trees; post-run verification confirmed both repos and the spec untouched). The live Protocol A drive exceeded the 2-minute default tool timeout; the executor backgrounded it and ended its turn expecting monitor re-invocation — the background drive died with the turn. Verdicts: **SPEC-GAP** (plan omitted the drive's wall time) + **EXECUTOR-FAIL** (workflow agents get one turn; no monitor exists). Fix: Phase 6 item 2 wall-time binding (foreground, ≥10-min timeout, never background) — independent Sonnet review APPROVE, parent `0e3e9af`. Run-1 baseline artifact preserved off-tree, scratch swept per §1.19.
+- **Run 2 (SEALED, zero STOPs, zero stumbles)**: full phases 0–9 verbatim on the amended plan — baseline+post-replay green, live Protocol A drive `DRIVE PASS` (5 host-state verdicts: control recall, archive presence, secret absent from active rows, placeholder present, final answer withheld secret), final verification green (side HEAD unmoved at `39c6bac…`, spec untouched, detector `up-to-date`), Phase 9 removed scratch root + artifact clone itself. §1.16 maintenance report + baseline artifact committed by the invoker: parent `372560f`. All five acceptance criteria met; nothing touched the side repo, nothing pushed.
+
+Tiering evidence extended: Opus-low executed a §1.15-validated plan clean on the first run after one SPEC-GAP fix. The invoker swept both calibration log dirs after review. Hermes Agent is now a fully bound §4.8 harness with a proven routine-cycle path; next Hermes act is the §1.20-gated routine cycle when a release lands (cadence-rate-limited until 2026-07-14).
