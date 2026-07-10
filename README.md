@@ -49,7 +49,7 @@ cd /absolute/path/to/tweakcc_context_bonsai
 bun run apply
 ```
 
-These patches are certified against Claude Code `2.1.201`. Apply fails closed on
+These patches are certified against Claude Code `2.1.205`. Apply fails closed on
 other versions: each patch verifies its sentinel appears exactly once in the
 target runtime, and aborts (restoring any backup) if the bundled files do not
 match. If apply reports a sentinel mismatch, rerun against a matching Claude Code
@@ -116,10 +116,10 @@ Because Claude Code is not open-source, there is no paired harness repo in this 
 
 ## Provenance and maintenance
 
-This port is certified against Claude Code `2.1.201`, verified live on
-2026-07-05. The full end-to-end run — install procedure, prune, retrieve,
+This port is certified against Claude Code `2.1.205`, verified live on
+2026-07-09. The full end-to-end run — install procedure, prune, retrieve,
 persistence across `--resume`, and the secret-prune oracle — is recorded in
-[`docs/e2e-results-2026-07-05-2.1.201.md`](docs/e2e-results-2026-07-05-2.1.201.md).
+[`docs/e2e-results-2026-07-09-2.1.205.md`](docs/e2e-results-2026-07-09-2.1.205.md).
 
 This port is kept current by an AI self-maintenance system that forward-ports Context Bonsai onto new upstream releases. See the process specs in the parent repo: https://github.com/Vibecodelicious/context-bonsai-agents/tree/main/docs/agent-specs
 

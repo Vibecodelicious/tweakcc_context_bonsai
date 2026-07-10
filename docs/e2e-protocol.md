@@ -4,7 +4,7 @@
 
 - Implementation name: tweakcc Context Bonsai for Claude Code
 - Repository root: repo-local `tweakcc_context_bonsai/` checkout under test
-- Runtime entry point: native `claude` (Anthropic Claude Code CLI), primary target Claude Code native `2.1.201` Linux x64
+- Runtime entry point: native `claude` (Anthropic Claude Code CLI), primary target Claude Code native `2.1.205` Linux x64
 - Session storage location: `~/.claude/projects/<project-hash>/<session-id>.jsonl`
 - Tool transport: MCP stdio (registered in `~/.claude.json` `mcpServers.context-bonsai`)
 - Runtime patch path: tweakcc 4.0 apply harness, `cd tweakcc_context_bonsai && bun run apply`
@@ -32,7 +32,7 @@ Per the cross-agent template at `docs/context-bonsai-e2e-template.md`:
 | E2E-05 | Compatibility error path | Missing JSONL or schema-mismatch produces a deterministic compatibility error; no mutation |
 | E2E-06 | Persistence across resume | Archived state survives `claude --resume <session-id>`; the optional tweakcc `archivedFilter` patch hides the archived range from the live transcript view |
 | E2E-07 | Secret prune oracle | After prune, model cannot reveal the pruned secret from active context alone |
-| E2E-08 | Bug-shape prune guard (direct versioned-path launch, no `--resume`) | The native binary launched directly by its versioned path (e.g. `~/.local/share/claude/versions/2.1.201`) with no `--resume` allows a prune; the archived range is actually removed from the model-visible transcript (content removal + input-token-footprint drop), and retrieve restores it. Pre-fix code reproduces the success-shaped refusal that archives nothing |
+| E2E-08 | Bug-shape prune guard (direct versioned-path launch, no `--resume`) | The native binary launched directly by its versioned path (e.g. `~/.local/share/claude/versions/2.1.205`) with no `--resume` allows a prune; the archived range is actually removed from the model-visible transcript (content removal + input-token-footprint drop), and retrieve restores it. Pre-fix code reproduces the success-shaped refusal that archives nothing |
 
 ## Pre-Flight
 
@@ -86,7 +86,7 @@ Every `claude --resume <session-id>` / `claude -r <session-id>` drive must run f
 - Archival state, by build shape. In the embedded-archival shape (the native 2.1.20x builds under test), archival state lives directly in the session JSONL: archived rows carry a top-level `archived` flag — this is what the `prune-effect`/`protocol-a-oracle` harnesses read (`isArchivedRow` in `e2e/native-e2e.ts`) — and only the anchor row carries `context_bonsai_v2` with `archived: true` in its anchor metadata (the placeholder summary entry carries `context_bonsai_v2.anchor_id`, not an `archived` field). No marker file is ever written in this shape; its absence is not a failure. In the marker-file shape, `addArchivedMarkerEntries` writes `~/.claude/archived-<session-id>.json`. Determine the shape of the build under test before collecting evidence; where a scenario's evidence-collection block below reads `~/.claude/archived-$SESSION_ID.json`, in the embedded-archival shape substitute extracting the top-level-`archived` rows from the session JSONL, and translate marker-file `Look for` / verdict items to the embedded flags — e.g. E2E-01's FAIL branch "marker file missing" reads as "no session-JSONL row carries the top-level `archived: true` flag". (Surfaced in 2.1.201 calibration run 1.)
 - Tool-response stdout from MCP (visible in Claude Code's transcript as `tool_result` blocks).
 - Optional: tweakcc UI capture (TUI screenshot or `script(1)` log) if patches applied.
-- Pinned-target artifact evidence: the frozen native `2.1.201` `extracted.js` + `manifest.json` (stored out-of-repo under `/tmp/cc-bonsai-artifacts/claude-code/2.1.201/native/` per the Evidence Retention Policy; pass via `--bundle`/`--manifest`), and the run's evidence JSON.
+- Pinned-target artifact evidence: the frozen native `2.1.205` `extracted.js` + `manifest.json` (stored out-of-repo under `/tmp/cc-bonsai-artifacts/claude-code/2.1.205/native/` per the Evidence Retention Policy; pass via `--bundle`/`--manifest`), and the run's evidence JSON.
 - Provider-request capture: the actual request body sent to the model API (see below). This is the only source that shows the real internal→provider mapping — injected `role:"system"` reminders, `local_command`→`user`, dropped `turn_duration` — none of which appear in the JSONL. It is the authority for message-ordering claims (E2E-08).
 
 Prefer JSONL inspection over stdout where both are available. For any claim about what the provider receives or rejects, prefer provider-request capture over JSONL — the JSONL is the stored transcript, not the transformed request.
@@ -442,7 +442,7 @@ independent of launch shape, and surfaces refusals with `isError: true`.
 
 ```bash
 # The patched native binary under test (adjust version as pinned).
-BIN="$HOME/.local/share/claude/versions/2.1.201"
+BIN="$HOME/.local/share/claude/versions/2.1.205"
 # Confirm the sentinel is embedded in the binary that will run.
 grep -a -c '/\*cb:archived-filter:v1\*/' "$BIN"   # expect >= 1
 ```
@@ -508,10 +508,10 @@ session JSONL excerpts (no secrets, no full transcripts).
 
 ## Pinned-Target Artifact Evidence
 
-Before a release-gate PASS, produce or refresh the evidence record for Claude Code native `2.1.201` Linux x64. The canonical artifact input is the extracted native bundle plus manifest, stored out-of-repo per the Evidence Retention Policy:
+Before a release-gate PASS, produce or refresh the evidence record for Claude Code native `2.1.205` Linux x64. The canonical artifact input is the extracted native bundle plus manifest, stored out-of-repo per the Evidence Retention Policy:
 
-- `/tmp/cc-bonsai-artifacts/claude-code/2.1.201/native/extracted.js`, or `CB_CLAUDE_TARGET_BUNDLE_JS=/path/to/extracted.js`
-- `/tmp/cc-bonsai-artifacts/claude-code/2.1.201/native/manifest.json`
+- `/tmp/cc-bonsai-artifacts/claude-code/2.1.205/native/extracted.js`, or `CB_CLAUDE_TARGET_BUNDLE_JS=/path/to/extracted.js`
+- `/tmp/cc-bonsai-artifacts/claude-code/2.1.205/native/manifest.json`
 
 The manifest and evidence output must include Claude Code version, platform/install kind, extraction tool and version, exact reproduction command or harness entry point, extracted bundle checksum, candidate counts, selected candidate evidence, timestamp, and operator. Credentials, session transcripts, and `~/.claude` auth/config data are forbidden in these artifacts.
 
@@ -520,14 +520,14 @@ Run:
 ```bash
 cd /path/to/tweakcc_context_bonsai
 bun run e2e/native-e2e.ts artifact-evidence \
-  --bundle /tmp/cc-bonsai-artifacts/claude-code/2.1.201/native/extracted.js \
-  --manifest /tmp/cc-bonsai-artifacts/claude-code/2.1.201/native/manifest.json \
+  --bundle /tmp/cc-bonsai-artifacts/claude-code/2.1.205/native/extracted.js \
+  --manifest /tmp/cc-bonsai-artifacts/claude-code/2.1.205/native/manifest.json \
   --out /tmp/cc-bonsai-e2e/<run>/target-artifact-evidence.json
 ```
 
 Verdict rules:
 
-- `PASS`: evidence JSON is written for native `2.1.201` Linux x64, checksum matches the bundle, discovery selects unique candidates for all three patch classes, and applying the patch registry verifies all sentinels.
+- `PASS`: evidence JSON is written for native `2.1.205` Linux x64, checksum matches the bundle, discovery selects unique candidates for all three patch classes, and applying the patch registry verifies all sentinels.
 - `BLOCKED`: extracted target bundle, manifest, extraction tool, or permission to create the native artifact is unavailable.
 - `FAIL`: candidate discovery is missing or ambiguous, checksum mismatches, required identity fields are missing, or patch application does not verify sentinels.
 

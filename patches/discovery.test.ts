@@ -17,8 +17,8 @@ import {
 
 const fixturesDir = join(import.meta.dir, '__fixtures__');
 const targetBundleEnv = 'CB_CLAUDE_TARGET_BUNDLE_JS';
-const defaultTargetBundlePath = '.artifacts/claude-code/2.1.201/linux-x64/extracted.js';
-const targetManifestPath = '.artifacts/claude-code/2.1.201/linux-x64/manifest.json';
+const defaultTargetBundlePath = '.artifacts/claude-code/2.1.205/linux-x64/extracted.js';
+const targetManifestPath = '.artifacts/claude-code/2.1.205/linux-x64/manifest.json';
 
 describe('anchor candidate discovery', () => {
   test('finds candidates from multiple regex strategies and deduplicates identical spans', () => {
@@ -108,7 +108,7 @@ test('target artifact visibility-predicate disambiguation selects one switch can
   const extractPath = process.env[targetBundleEnv] ?? defaultTargetBundlePath;
   if (!existsSync(extractPath)) {
     console.warn(
-      'SKIP Claude Code native 2.1.201 Linux x64 target discovery: ' +
+      'SKIP Claude Code native 2.1.205 Linux x64 target discovery: ' +
         `expected default extracted bundle path tweakcc_context_bonsai/${defaultTargetBundlePath} ` +
         `(from this package: ${defaultTargetBundlePath}) or env override ${targetBundleEnv}; ` +
         `manifest path ${targetManifestPath}`

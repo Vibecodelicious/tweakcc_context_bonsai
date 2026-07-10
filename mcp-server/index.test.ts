@@ -856,7 +856,7 @@ describe("discovery layer — running-binary identification", () => {
   }
 
   test("shape 1: direct native version-named binary, no --resume → resolves to that binary", async () => {
-    const nativeBinary = "/home/op/.local/share/claude/versions/2.1.201";
+    const nativeBinary = "/home/op/.local/share/claude/versions/2.1.205";
     const tree: Record<string, SyntheticProcess> = {
       // bun run mcp-server/index.ts (bun does not exec-replace)
       [mcpPid]: { ppid: "5000", argv: [bunExe, "run", "mcp-server/index.ts"], exe: bunExe },
