@@ -1,0 +1,90 @@
+[
+  {
+    "anchor_id": "archived-filter.visibility",
+    "source_version": "2.1.201",
+    "target_version": "2.1.205",
+    "bucket": "unchanged_anchor",
+    "replay_action": "verify-unchanged",
+    "mapping_type": "1:1",
+    "target_paths": ["patches/anchors.ts"],
+    "rationale": "selectVisibilitySwitchAnchor selects uniquely at offset 12060646, score 105, candidateCount 1 against the 2.1.205 bundle; same seam (tengu_api_cache_breakpoints + user/api_system/else converter branches). No selector/scorer/threshold edit; minified converter identifier churned to m0y (structural selector is identifier-agnostic).",
+    "evidence_ref": "docs/semantic-anchor-analysis-2.1.205.md#archived-filter.visibility"
+  },
+  {
+    "anchor_id": "message-content-ids.converter",
+    "source_version": "2.1.201",
+    "target_version": "2.1.205",
+    "bucket": "unchanged_anchor",
+    "replay_action": "verify-unchanged",
+    "mapping_type": "1:1",
+    "target_paths": ["patches/anchors.ts"],
+    "rationale": "selectMessageContentConverterAnchor selects offset 12001217, score 110, candidateCount 24; 4-arg cache-breakpoint signature m0y(e,t=!1,r,n) intact. No edit required.",
+    "evidence_ref": "docs/semantic-anchor-analysis-2.1.205.md#message-content-ids.converter"
+  },
+  {
+    "anchor_id": "context-bonsai-gauge.token-usage",
+    "source_version": "2.1.201",
+    "target_version": "2.1.205",
+    "bucket": "unchanged_anchor",
+    "replay_action": "verify-unchanged",
+    "mapping_type": "1:1",
+    "target_paths": ["patches/anchors.ts"],
+    "rationale": "selectTokenUsageHelperAnchor selects offset 7731641, score 62, candidateCount 9; accumulator Upg(e,t,r) with m5o(r)??{inputTokens:0,...} init, uniquely won over the usage-display formatter. No threshold edit.",
+    "evidence_ref": "docs/semantic-anchor-analysis-2.1.205.md#context-bonsai-gauge.token-usage"
+  },
+  {
+    "anchor_id": "context-bonsai-gauge.attachment-pipeline",
+    "source_version": "2.1.201",
+    "target_version": "2.1.205",
+    "bucket": "unchanged_anchor",
+    "replay_action": "verify-unchanged",
+    "mapping_type": "1:1",
+    "target_paths": ["patches/anchors.ts"],
+    "rationale": "selectAttachmentPipelineAnchor selects offset 7848655, score 50, candidateCount 15 (was 17 at 2.1.201); pipeline Wbu(e,t) with .push attachment assembly wins uniquely. Candidate-count change absorbed by the scorer; no edit.",
+    "evidence_ref": "docs/semantic-anchor-analysis-2.1.205.md#context-bonsai-gauge.attachment-pipeline"
+  },
+  {
+    "anchor_id": "context-bonsai-gauge.reminder-render",
+    "source_version": "2.1.201",
+    "target_version": "2.1.205",
+    "bucket": "unchanged_anchor",
+    "replay_action": "verify-unchanged",
+    "mapping_type": "1:1",
+    "target_paths": ["patches/anchors.ts"],
+    "rationale": "selectReminderRenderAnchor selects uniquely at offset 14755101, score 40, candidateCount 1; switch(e.type) attachment-render site. No edit.",
+    "evidence_ref": "docs/semantic-anchor-analysis-2.1.205.md#context-bonsai-gauge.reminder-render"
+  },
+  {
+    "anchor_id": "runtime-helper.config-dir",
+    "source_version": "2.1.201",
+    "target_version": "2.1.205",
+    "bucket": "unchanged_anchor",
+    "replay_action": "verify-unchanged",
+    "mapping_type": "1:1",
+    "target_paths": ["patches/discovery.ts"],
+    "rationale": "findRuntimeHelpers resolves configDirFunc uniquely to sn (was rr); identifier churn absorbed by the frequency/structure ranking. No edit.",
+    "evidence_ref": "docs/semantic-anchor-analysis-2.1.205.md#runtime-helper.config-dir"
+  },
+  {
+    "anchor_id": "runtime-helper.fs",
+    "source_version": "2.1.201",
+    "target_version": "2.1.205",
+    "bucket": "unchanged_anchor",
+    "replay_action": "verify-unchanged",
+    "mapping_type": "1:1",
+    "target_paths": ["patches/discovery.ts"],
+    "rationale": "findRuntimeHelpers resolves fsFunc uniquely to Gt (was Xt) via the <id>().existsSync/readFileSync/writeFileSync shape. No edit.",
+    "evidence_ref": "docs/semantic-anchor-analysis-2.1.205.md#runtime-helper.fs"
+  },
+  {
+    "anchor_id": "runtime-helper.session-id",
+    "source_version": "2.1.201",
+    "target_version": "2.1.205",
+    "bucket": "unchanged_anchor",
+    "replay_action": "verify-unchanged",
+    "mapping_type": "1:1",
+    "target_paths": ["patches/discovery.ts"],
+    "rationale": "findRuntimeHelpers resolves sessionIdFunc uniquely to wt (was Dt) via the sessionId-keyed pattern. No edit.",
+    "evidence_ref": "docs/semantic-anchor-analysis-2.1.205.md#runtime-helper.session-id"
+  }
+]
